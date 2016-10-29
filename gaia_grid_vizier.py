@@ -5,11 +5,21 @@ import astropy.units as u
 import astropy.coordinates as coord
 from astropy import wcs
 from astropy.io import fits
+from astropy.time import Time, TimeDelta
+import datetime
 import numpy as np
 from scipy.ndimage import gaussian_filter
+from astropy.convolution import convolve_fft
+import os
+import ConfigParser
+import inspect
+from pypride.classes import inp_set
+from pypride.vintlib import eop_update
 
-# import matplotlib
-# matplotlib.use('Qt5Agg')
+from sso_state import sso_state
+
+import matplotlib
+matplotlib.use('Qt5Agg')
 
 import matplotlib.pyplot as plt
 # import seaborn as sns
@@ -27,13 +37,17 @@ v.ROW_LIMIT = -1
 v.TIMEOUT = 3600
 
 
-def generate_image(xy, mag, nx=2048, ny=2048):
+def generate_image(xy, mag, xy_ast=None, mag_ast=None, exp=None, nx=2048, ny=2048, psf=None):
     """
 
     :param xy:
     :param mag:
+    :param xy_ast:
+    :param mag_ast:
+    :param exp: exposure in seconds to 'normalize' streak
     :param nx:
     :param ny:
+    :param psf:
     :return:
     """
     if isinstance(xy, list):
@@ -54,10 +68,84 @@ def generate_image(xy, mag, nx=2048, ny=2048):
         if i < nx and j < ny:
             image[int(j), int(i)] = flux[k]
 
-    # Convolve with a gaussian
-    image = gaussian_filter(image, 7)
+    if exp is None:
+        exp = 1.0
+    # add asteroid
+    if xy_ast is not None and mag_ast is not None:
+        flux = flux_0 * 10 ** (0.4 * (6 - mag_ast))
+        # print(flux)
+        xy_ast = np.array(xy_ast, dtype=np.int)
+        line_points = get_line(xy_ast[0, :], xy_ast[1, :])
+        for (i, j) in line_points:
+            if i < nx and j < ny:
+                image[int(j), int(i)] = flux / exp
+
+    if psf is None:
+        # Convolve with a gaussian
+        image = gaussian_filter(image, 7)
+    else:
+        # convolve with a (model) psf
+        image = convolve_fft(image, psf)
 
     return image
+
+
+def get_line(start, end):
+    """Bresenham's Line Algorithm
+    Produces a list of tuples from start and end
+
+    >>> points1 = get_line((0, 0), (3, 4))
+    >>> points2 = get_line((3, 4), (0, 0))
+    >>> assert(set(points1) == set(points2))
+    >>> print points1
+    [(0, 0), (1, 1), (1, 2), (2, 3), (3, 4)]
+    >>> print points2
+    [(3, 4), (2, 3), (1, 2), (1, 1), (0, 0)]
+    """
+    # Setup initial conditions
+    x1, y1 = start
+    x2, y2 = end
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Determine how steep the line is
+    is_steep = abs(dy) > abs(dx)
+
+    # Rotate line
+    if is_steep:
+        x1, y1 = y1, x1
+        x2, y2 = y2, x2
+
+    # Swap start and end points if necessary and store swap state
+    swapped = False
+    if x1 > x2:
+        x1, x2 = x2, x1
+        y1, y2 = y2, y1
+        swapped = True
+
+    # Recalculate differentials
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Calculate error
+    error = int(dx / 2.0)
+    ystep = 1 if y1 < y2 else -1
+
+    # Iterate over bounding box generating points between start and end
+    y = y1
+    points = []
+    for x in range(x1, x2 + 1):
+        coord = (y, x) if is_steep else (x, y)
+        points.append(coord)
+        error -= abs(dy)
+        if error < 0:
+            y += ystep
+            error += dx
+
+    # Reverse the list if the coordinates were swapped
+    if swapped:
+        points.reverse()
+    return points
 
 
 def radec2uv(p, x):
@@ -108,6 +196,53 @@ def uv2xy(uv, M):
 
 
 if __name__ == '__main__':
+    # load config data
+    abs_path = os.path.dirname(inspect.getfile(inspect.currentframe()))
+    config = ConfigParser.RawConfigParser()
+    config.read(os.path.join(abs_path, 'config.ini'))
+
+    _f_inp = config.get('Path', 'pypride_inp')
+
+    # inp file for running pypride:
+    inp = inp_set(_f_inp)
+    inp = inp.get_section('all')
+
+    # update pypride eops
+    eop_update(inp['cat_eop'], 3)
+
+    # asteroid database:
+    path_to_database = config.get('Path', 'asteroid_database_path')
+    f_database = os.path.join(path_to_database, 'ELEMENTS.NUMBR')
+    # print(f_database)
+
+    ''' main part '''
+
+    ''' asteroid (TODO: if any? doable, but very expensive...): '''
+    time_str = '20161022_042047.042560'
+    exposure = TimeDelta(180, format='sec')
+    start_time = Time(str(datetime.datetime.strptime(time_str, '%Y%m%d_%H%M%S.%f')), format='iso', scale='utc')
+    stop_time = start_time + exposure
+
+    asteroid_name = '3200_Phaeton'
+
+    ra_start, dec_start, _, _, vmag_start = sso_state(_name=asteroid_name, _time=start_time,
+                                                      _path_to_database=f_database,
+                                                      _path_to_jpl_eph=inp['jpl_eph'],
+                                                      _epoch='J2000')
+    ra_start = Angle(ra_start)
+    dec_start = Angle(dec_start)
+    print(ra_start, dec_start, vmag_start)
+    asteroid_start = coord.SkyCoord(ra=ra_start, dec=dec_start, frame='icrs')
+    ra_stop, dec_stop, _, _, vmag_stop = sso_state(_name=asteroid_name, _time=stop_time,
+                                                   _path_to_database=f_database,
+                                                   _path_to_jpl_eph=inp['jpl_eph'],
+                                                   _epoch='J2000')
+    print(ra_stop, dec_stop, vmag_stop)
+    ra_stop = Angle(ra_stop)
+    dec_stop = Angle(dec_stop)
+    asteroid_stop = coord.SkyCoord(ra=ra_stop, dec=dec_stop, frame='icrs')
+
+    ''' field '''
     field_width = Angle('60s')
     ra = Angle('22h14m53.2503s')
     dec = Angle('+52d46m47.4463s')
@@ -121,8 +256,10 @@ if __name__ == '__main__':
     grid_stars = v.query_region(target, width=field_width, height=field_width, catalog=catalogues.values())
     # for cat in catalogues:
     #     print(grid_stars[catalogues[cat]])
+    # print(grid_stars[catalogues['gaia_dr1']]['RA_ICRS'])
+    # print(grid_stars[catalogues['gaia_dr1']]['_RAJ2000'])
 
-    # create a chart
+    ''' set up WCS '''
     # Create a new WCS object.  The number of axes must be set
     # from the start
     w = wcs.WCS(naxis=2)
@@ -174,9 +311,23 @@ if __name__ == '__main__':
     # print(pix_stars)
     # print(mag_stars)
 
-    sim_image = generate_image(xy=pix_stars, mag=mag_stars, nx=w.naxis1, ny=w.naxis2)
+    pix_asteroid = np.array([w.wcs_world2pix(asteroid_start.ra.deg, asteroid_start.dec.deg, 0),
+                             w.wcs_world2pix(asteroid_stop.ra.deg, asteroid_stop.dec.deg, 0)])
+    mag_asteroid = np.mean([vmag_start, vmag_stop])
+    print(pix_asteroid)
+    print(mag_asteroid)
 
-    # convert to fits hdu:
+    # load model psf for the result to look more natural
+    psf_fits = '/Users/dmitryduev/_caltech/python/strehl/Strehl_calcs/SR_RESULTS/model_PSFs/lp600_scaled_SFmax.fits'
+    # psf_fits = '/Users/dmitryduev/_caltech/python/strehl/Strehl_calcs/SR_RESULTS/model_PSFs/lp600_oversampled_SFmin.fits'
+    with fits.open(psf_fits) as hdulist:
+        model_psf = hdulist[0].data
+
+    sim_image = generate_image(xy=pix_stars, mag=mag_stars,
+                               xy_ast=pix_asteroid, mag_ast=mag_asteroid, exp=exposure.sec,
+                               nx=w.naxis1, ny=w.naxis2, psf=model_psf)
+
+    # convert simulated image to fits hdu:
     hdu = fits.PrimaryHDU(sim_image, header=w.to_header())
 
     ''' plot! '''
@@ -193,11 +344,14 @@ if __name__ == '__main__':
     fig.grid.set_color('gray')
     fig.grid.set_alpha(0.8)
 
-    # display field
-    # fig.show_colorscale(cmap='viridis')  # magma
-    fig.show_grayscale()
+    ''' display field '''
+    # fig.show_colorscale(cmap='viridis')
+    fig.show_colorscale(cmap='magma')
+    # fig.show_grayscale()
     # fig.show_markers(grid_stars[cat]['_RAJ2000'], grid_stars[cat]['_DEJ2000'],
     #                  layer='marker_set_1', edgecolor='white',
     #                  facecolor='white', marker='o', s=30, alpha=0.7)
+
+
 
     plt.show()
