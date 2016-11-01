@@ -13,8 +13,10 @@ from astropy.convolution import convolve_fft
 import os
 import ConfigParser
 import inspect
-from pypride.classes import inp_set
-from pypride.vintlib import eop_update
+from pypride.classes import inp_set, constants
+from pypride.vintlib import eop_update, internet_on, load_cats, mjuliandate, taitime, eop_iers, t_eph, ter2cel, \
+                            dehanttideinel, poletide, hardisp
+# from pypride.vintflib import pleph
 
 from sso_state import sso_state
 
@@ -35,6 +37,81 @@ import aplpy
 v = Vizier()
 v.ROW_LIMIT = -1
 v.TIMEOUT = 3600
+
+
+def load_sta_eop(_inp, _date, station_name='KP-VLBA'):
+    const = constants()
+
+    ''' load cats '''
+    _, sta, eops = load_cats(_inp, 'DUMMY', 'S', [station_name], _date)
+
+    ''' calculate site positions in geodetic coordinate frame
+    + transformation matrix VW from VEN to the Earth-fixed coordinate frame '''
+    for ii, st in enumerate(sta):
+        sta[ii].geodetic(const)
+
+    return sta, eops
+
+
+def sta_compute_position(sta, eops, _date):
+    """
+        Get pypride station object with precomputed GCRS position for station-centric ra/decs
+    :param _inp:
+    :param _date: datetime object. needed to load eops?
+    :param station_name:
+    :return:
+    """
+
+    ''' set dates: '''
+    mjd = mjuliandate(_date.year, _date.month, _date.day)
+    # dd = mjd - mjd_start
+    UTC = (_date.hour + _date.minute / 60.0 + _date.second / 3600.0) / 24.0
+    JD = mjd + 2400000.5
+
+    ''' compute tai & tt '''
+    TAI, TT = taitime(mjd, UTC)
+
+    ''' interpolate eops to tstamp '''
+    UT1, eop_int = eop_iers(mjd, UTC, eops)
+
+    ''' compute coordinate time fraction of CT day at 1st observing site '''
+    CT, dTAIdCT = t_eph(JD, UT1, TT, sta[0].lon_gcen, sta[0].u, sta[0].v)
+
+    ''' BCRS state vectors of celestial bodies at JD+CT, [m, m/s]: '''
+    # ## Earth:
+    # rrd = pleph(JD + CT, 3, 12, inp['jpl_eph'])
+    # earth = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
+    # # Earth's acceleration in m/s**2:
+    # v_plus = np.array(pleph(JD + CT + 1.0 / 86400.0, 3, 12, inp['jpl_eph'])[3:])
+    # v_minus = np.array(pleph(JD + CT - 1.0 / 86400.0, 3, 12, inp['jpl_eph'])[3:])
+    # a = (v_plus - v_minus) * 1e3 / 2.0
+    # a = np.array(np.matrix(a).T)
+    # earth = np.hstack((earth, a))
+    # ## Sun:
+    # rrd = pleph(JD + CT, 11, 12, inp['jpl_eph'])
+    # sun = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
+    # ## Moon:
+    # rrd = pleph(JD + CT, 10, 12, inp['jpl_eph'])
+    # moon = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
+
+    ''' rotation matrix IERS '''
+    r2000 = ter2cel(_date, eop_int, dTAIdCT, 'iau2000')
+
+    ''' ignore displacements due to geophysical effects '''
+    for ii, st in enumerate(sta):
+        if st.name == 'GEOCENTR' or st.name == 'RA':
+            continue
+        # sta[ii] = dehanttideinel(st, _date, earth, sun, moon, r2000)
+        # sta[ii] = hardisp(st, _date, r2000)
+        # sta[ii] = poletide(st, _date, eop_int, r2000)
+
+    ''' add up geophysical corrections and convert sta state to J2000 '''
+    for ii, st in enumerate(sta):
+        if st.name == 'GEOCENTR' or st.name == 'RA':
+            continue
+        sta[ii].j2000gp(r2000)
+
+    return sta[0]
 
 
 def generate_image(xy, mag, xy_ast=None, mag_ast=None, exp=None, nx=2048, ny=2048, psf=None):
@@ -208,7 +285,8 @@ if __name__ == '__main__':
     inp = inp.get_section('all')
 
     # update pypride eops
-    eop_update(inp['cat_eop'], 3)
+    if internet_on():
+        eop_update(inp['cat_eop'], 3)
 
     # asteroid database:
     path_to_database = config.get('Path', 'asteroid_database_path')
@@ -225,18 +303,25 @@ if __name__ == '__main__':
 
     asteroid_name = '3200_Phaeton'
 
+    # load pypride stuff
+    _sta, _eops = load_sta_eop(_inp=inp, _date=start_time.datetime, station_name='KP-VLBA')
+
+    kitt_peak = sta_compute_position(sta=_sta, eops=_eops, _date=start_time.datetime)
+
     ra_start, dec_start, _, _, vmag_start = sso_state(_name=asteroid_name, _time=start_time,
                                                       _path_to_database=f_database,
                                                       _path_to_jpl_eph=inp['jpl_eph'],
-                                                      _epoch='J2000')
+                                                      _epoch='J2000', _station=kitt_peak)
     ra_start = Angle(ra_start)
     dec_start = Angle(dec_start)
     print(ra_start, dec_start, vmag_start)
     asteroid_start = coord.SkyCoord(ra=ra_start, dec=dec_start, frame='icrs')
+
+    kitt_peak = sta_compute_position(sta=_sta, eops=_eops, _date=stop_time.datetime)
     ra_stop, dec_stop, _, _, vmag_stop = sso_state(_name=asteroid_name, _time=stop_time,
                                                    _path_to_database=f_database,
                                                    _path_to_jpl_eph=inp['jpl_eph'],
-                                                   _epoch='J2000')
+                                                   _epoch='J2000', _station=kitt_peak)
     print(ra_stop, dec_stop, vmag_stop)
     ra_stop = Angle(ra_stop)
     dec_stop = Angle(dec_stop)
@@ -320,8 +405,12 @@ if __name__ == '__main__':
     # load model psf for the result to look more natural
     psf_fits = '/Users/dmitryduev/_caltech/python/strehl/Strehl_calcs/SR_RESULTS/model_PSFs/lp600_scaled_SFmax.fits'
     # psf_fits = '/Users/dmitryduev/_caltech/python/strehl/Strehl_calcs/SR_RESULTS/model_PSFs/lp600_oversampled_SFmin.fits'
-    with fits.open(psf_fits) as hdulist:
-        model_psf = hdulist[0].data
+    try:
+        with fits.open(psf_fits) as hdulist:
+            model_psf = hdulist[0].data
+    except IOError:
+        # couldn't load? use a simple Gaussian then
+        model_psf = None
 
     sim_image = generate_image(xy=pix_stars, mag=mag_stars,
                                xy_ast=pix_asteroid, mag_ast=mag_asteroid, exp=exposure.sec,
@@ -352,6 +441,12 @@ if __name__ == '__main__':
     #                  layer='marker_set_1', edgecolor='white',
     #                  facecolor='white', marker='o', s=30, alpha=0.7)
 
-
+    # add asteroid 'from'->'to'
+    fig.show_markers(asteroid_start.ra.deg, asteroid_start.dec.deg,
+                     layer='marker_set_1', edgecolor=plt.cm.Blues(0.2),
+                     facecolor=plt.cm.Blues(0.3), marker='o', s=50, alpha=0.7)
+    fig.show_markers(asteroid_stop.ra.deg, asteroid_stop.dec.deg,
+                     layer='marker_set_2', edgecolor=plt.cm.Oranges(0.5),
+                     facecolor=plt.cm.Oranges(0.3), marker='x', s=50, alpha=0.7)
 
     plt.show()

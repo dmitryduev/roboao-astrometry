@@ -218,13 +218,14 @@ class Kepler(object):
         return r2000
 
     # @jit
-    def raDecVmag(self, mjd, jpl_eph, epoch='J2000', output_Vmag=False):
+    def raDecVmag(self, mjd, jpl_eph, epoch='J2000', station=None, output_Vmag=False):
         """ Calculate ra/dec's from equatorial state
             Then compute asteroid's expected visual magnitude
 
         :param mjd: MJD epoch in decimal days
         :param jpl_eph: target's heliocentric equatorial
         :param epoch: RA/Dec epoch. 'J2000', 'Date' or float (like 2015.0)
+        :param station: None or pypride station object
         :param output_Vmag: return Vmag?
 
         :return: SkyCoord(ra,dec), ra/dec rates, Vmag
@@ -244,8 +245,11 @@ class Kepler(object):
         # quick and dirty LT computation (but accurate enough for pointing, I hope)
         # LT-correction:
         C = 299792458.0
-        lt = np.linalg.norm(earth[:, 0] - (sun[:, 0] + state[:, 0])) / C
-        #        print(lt)
+        if station is None:
+            lt = np.linalg.norm(earth[:, 0] - (sun[:, 0] + state[:, 0])) / C
+        else:
+            lt = np.linalg.norm((earth[:, 0] + station.r_GCRS) - (sun[:, 0] + state[:, 0])) / C
+        # print(lt)
 
         # recompute:
         # Sun:
@@ -254,8 +258,24 @@ class Kepler(object):
         # target state:
         state = self.ecliptic_to_equatorial(self.to_cart(mjd - lt / 86400.0))
 
-        # TODO: this is geocentric RA/Dec. Try station-centric
-        r = (sun[:, 0] + state[:, 0]) - earth[:, 0]
+        if station is None:
+            lt = np.linalg.norm(earth[:, 0] - (sun[:, 0] + state[:, 0])) / C
+        else:
+            lt = np.linalg.norm((earth[:, 0] + station.r_GCRS) - (sun[:, 0] + state[:, 0])) / C
+        # print(lt)
+
+        # recompute again:
+        # Sun:
+        rrd = pleph(jd - lt / 86400.0, 11, 12, jpl_eph)
+        sun = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
+        # target state:
+        state = self.ecliptic_to_equatorial(self.to_cart(mjd - lt / 86400.0))
+
+        # geocentric/topocentric RA/Dec
+        if station is None:
+            r = (sun[:, 0] + state[:, 0]) - earth[:, 0]
+        else:
+            r = (sun[:, 0] + state[:, 0]) - (earth[:, 0] + station.r_GCRS)
         # RA/Dec J2000:
         ra = np.arctan2(r[1], r[0])  # right ascension
         dec = np.arctan(r[2] / np.sqrt(r[0] ** 2 + r[1] ** 2))  # declination
@@ -263,7 +283,10 @@ class Kepler(object):
             ra += 2.0 * np.pi
 
         # go for time derivatives:
-        v = (sun[:, 1] + state[:, 1]) - earth[:, 1]
+        if station is None:
+            v = (sun[:, 1] + state[:, 1]) - earth[:, 1]
+        else:
+            v = (sun[:, 1] + state[:, 1]) - (earth[:, 1] + station.v_GCRS)
         # in rad/s:
         ra_dot = (v[1] / r[0] - r[1] * v[0] / r[0] ** 2) / (1 + (r[1] / r[0]) ** 2)
         dec_dot = (v[2] / np.sqrt(r[0] ** 2 + r[1] ** 2) -
@@ -330,13 +353,15 @@ class Kepler(object):
         return [ra, dec], [ra_dot, dec_dot], Vmag
 
 
-def get_asteroid_state(target, mjd, _jpl_eph, _epoch=None):
+def get_asteroid_state(target, mjd, _jpl_eph, _epoch='J2000', _station=None):
     """ Compute obs parameters for a given t
 
     :param target: Kepler class object
     :param mjd: epoch in TDB/mjd (t.tdb.mjd, t - astropy.Time object, UTC)
     :param _jpl_eph: DE eph from pypride
-    :param _epoch: None, 'Date', 'J2000' or float (jdate)
+    :param _epoch: 'J2000' (default), 'Date', or float (jdate like 2015.0)
+    :param _station: None or pypride station object, if 'topocentric' ra/dec's are desired
+
     :return: radec in rad, radec_dot in arcsec/s, Vmag
     """
 
@@ -357,10 +382,7 @@ def get_asteroid_state(target, mjd, _jpl_eph, _epoch=None):
     asteroid = Kepler(a, e, i, w, Node, M0, GSUN, t0, H, G)
 
     # jpl_eph - path to eph used by pypride
-    if _epoch is None:
-        radec, radec_dot, Vmag = asteroid.raDecVmag(mjd, jpl_eph=_jpl_eph, output_Vmag=True)
-    else:
-        radec, radec_dot, Vmag = asteroid.raDecVmag(mjd, jpl_eph=_jpl_eph, epoch=_epoch, output_Vmag=True)
+    radec, radec_dot, Vmag = asteroid.raDecVmag(mjd, jpl_eph=_jpl_eph, epoch=_epoch, station=_station, output_Vmag=True)
 
     return radec, radec_dot, Vmag
 
@@ -444,17 +466,20 @@ def get_state_asteroid(_asteroid, _t, _jpl_eph):
     return ra, dec, ra_rate, dec_rate, vmag
 
 
-def get_state_asteroid_astropy(_asteroid, _t, _jpl_eph, _epoch=None):
+def get_state_asteroid_astropy(_asteroid, _t, _jpl_eph, _epoch='J2000', _station=None):
     """
     :param _asteroid:
     :param _t:
     :param _jpl_eph:
+    :param _epoch: 'J2000' (default), 'Date' or jdate
+    :param _station: None (default) or pypride station object if 'topocentric' ra/dec's are desired
+
     :return:
-     current J2000 ra/dec of a moving object
-     current J2000 ra/dec rates of a moving object
+     current ra/dec of a moving object at epoch
+     current ra/dec rates of a moving object at epoch
      if mag <= self.m_lim
     """
-    radec, radec_dot, vmag = get_asteroid_state(_asteroid, _t, _jpl_eph, _epoch)
+    radec, radec_dot, vmag = get_asteroid_state(_asteroid, _t, _jpl_eph, _epoch, _station)
 
     # reformat
     ra = '{:02.0f}h{:02.0f}m{:02.3f}s'.format(*hms(radec[0]))
@@ -526,14 +551,17 @@ def get_state_planet_or_moon(body, t):
     return ra, dec, ra_rate, dec_rate
 
 
-def sso_state(_name, _time, _path_to_database, _path_to_jpl_eph, _epoch):
+def sso_state(_name, _time, _path_to_database, _path_to_jpl_eph, _epoch, _station=None):
     """
 
     :param _name:
     :param _time:
     :param _path_to_database:
     :param _path_to_jpl_eph:
-    :return:
+    :param _epoch:
+    :param _station:
+
+    :return: asteroid state and vmag
     """
     if not is_planet_or_moon(_name):
         ''' asteroids '''
@@ -546,7 +574,8 @@ def sso_state(_name, _time, _path_to_database, _path_to_jpl_eph, _epoch):
 
         try:
             ra, dec, ra_rate, dec_rate, vmag = get_state_asteroid_astropy(_asteroid=asteroid, _t=_time.tdb.mjd,
-                                                                          _jpl_eph=_path_to_jpl_eph, _epoch=_epoch)
+                                                                          _jpl_eph=_path_to_jpl_eph, _epoch=_epoch,
+                                                                          _station=_station)
             # print(0, ra, dec, ra_rate, dec_rate, vmag)
         except Exception as e:
             print(e)
