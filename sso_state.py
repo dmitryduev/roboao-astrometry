@@ -25,12 +25,12 @@ import ephem
 import datetime
 import urllib2
 import inspect
+import traceback
 import ConfigParser
 from pypride.classes import inp_set
 from pypride.vintflib import pleph
 from pypride.vintlib import sph2cart, cart2sph, iau_PNM00A
-from pypride.vintlib import eop_update
-import traceback
+from pypride.vintlib import eop_update, mjuliandate
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -387,12 +387,12 @@ def get_asteroid_state(target, mjd, _jpl_eph, _epoch='J2000', _station=None):
     return radec, radec_dot, Vmag
 
 
-def asteroid_database_update(_f_database, n=1):
-    """ Fetch a database update from JPL
+def asteroid_database_update(_f_database, _url='http://ssd.jpl.nasa.gov/dat/ELEMENTS.NUMBR', n=1.0):
+    """
+        Fetch an asteroid database update
 
-    :param _f_database:
-    :param n: days old
-    :return:
+        JPL: http://ssd.jpl.nasa.gov/dat/ELEMENTS.NUMBR
+        MPC: http://www.minorplanetcenter.net/iau/MPCORB/ + [MPCORB.DAT, PHA.txt, NEA.txt, ...]
     """
     do_update = False
     if os.path.isfile(_f_database):
@@ -400,18 +400,18 @@ def asteroid_database_update(_f_database, n=1):
               datetime.datetime.utcfromtimestamp(os.path.getmtime(_f_database))
         if age.days > n:
             do_update = True
-            # print('Asteroid database: {:s} is out of date, updating...'.format(_f_database))
+            print('Asteroid database: {:s} is out of date, updating...'.format(_f_database))
     else:
         do_update = True
-        # print('Database file: {:s} is missing, fetching...'.format(_f_database))
+        print('Database file: {:s} is missing, fetching...'.format(_f_database))
     # if the file is older than n days:
     if do_update:
         try:
-            response = urllib2.urlopen('http://ssd.jpl.nasa.gov/dat/ELEMENTS.NUMBR')
+            response = urllib2.urlopen(_url)
             with open(_f_database, 'w') as f:
                 f.write(response.read())
-        except:  # Exception, err:
-            # print(str(err))
+        except Exception as err:
+            print(str(err))
             pass
 
 
@@ -437,6 +437,153 @@ def asteroid_data_load(_f_database, asteroid_name):
                    ('M0', '<f8'), ('H', '<f8'), ('G', '<f8')])
     return np.array([((int(l[0:6]),) + (l[6:25].strip(),) +
                                tuple(map(float, l[25:].split()[:-2])))], dtype=dt)
+
+
+def unpack_epoch(epoch_str):
+    def l2num(l):
+        try:
+            num = int(l)
+        except ValueError:
+            num = ord(l) - 55
+        return num
+
+    centuries = {'I': '18', 'J': '19', 'K': '20'}
+
+    epoch = '{:s}{:s}{:02d}{:02d}'.format(centuries[epoch_str[0]], epoch_str[1:3],
+                                          l2num(epoch_str[3]), l2num(epoch_str[4]))
+
+    # convert to mjd:
+    epoch_datetime = datetime.datetime.strptime(epoch, '%Y%m%d')
+    mjd = mjuliandate(epoch_datetime.year, epoch_datetime.month, epoch_datetime.day)
+
+    return mjd
+
+
+def asteroid_database_load(_f_database, _provider='mpc'):
+    """
+        Load MPC database
+        :param _provider: 'mpc' or 'jpl'
+    """
+
+    # update database if necessary:
+    if _provider == 'jpl':
+        _url = 'http://ssd.jpl.nasa.gov/dat/ELEMENTS.NUMBR'
+    elif _provider == 'mpc':
+        _url = 'http://www.minorplanetcenter.net/iau/MPCORB/MPCORB.DAT'
+    else:
+        raise Exception('ephemeris provider not recognized')
+
+    asteroid_database_update(_f_database, _url=_url)
+
+    with open(_f_database, 'r') as f:
+        database = f.readlines()
+
+    start = [i for i, l in enumerate(database[:300]) if l[0:2] == '--']
+    if len(start) > 0:
+        database = database[start[0] + 1:]
+    # remove empty lines:
+    database = [l for l in database if len(l) > 5]
+
+    if _provider == 'jpl':
+        dt = np.dtype([('name', '|S21'),
+                       ('epoch', '<i8'), ('a', '<f8'),
+                       ('e', '<f8'), ('i', '<f8'),
+                       ('w', '<f8'), ('Node', '<f8'),
+                       ('M0', '<f8'), ('H', '<f8'), ('G', '<f8')])
+        return np.array([((l[0:6] + '_' + l[6:25].strip(),) +
+                          tuple(map(float, l[25:].split()[:-2]))) for l in database[2:]],
+                        dtype=dt)
+
+    elif _provider == 'mpc':
+        dt = np.dtype([('designation', '|S21'), ('H', '<f8'), ('G', '<f8'),
+                       ('epoch', '<f8'), ('M0', '<f8'), ('w', '<f8'),
+                       ('Node', '<f8'), ('i', '<f8'), ('e', '<f8'),
+                       ('n', '<f8'), ('a', '<f8'), ('U', '|S21'),
+                       ('n_obs', '<f8'), ('n_opps', '<f8'), ('arc', '|S21'),
+                       ('rms', '|S21'), ('name', '|S21'), ('last_obs', '|S21')
+                      ])
+
+        return np.array([(str(entry[:7]).strip(),) + (float(entry[8:13]) if len(entry[8:13].strip()) > 0 else 20.0,)
+                           + (float(entry[14:19]) if len(entry[14:19].strip()) > 0 else 0.15,)
+                           + (unpack_epoch(str(entry[20:25])),) + (float(entry[26:35]),) + (float(entry[37:46]),)
+                           + (float(entry[48:57]),) + (float(entry[59:68]),) + (float(entry[70:79]),)
+                           + (float(entry[80:91]) if len(entry[80:91].strip()) > 0 else 0,)
+                           + (float(entry[92:103]) if len(entry[92:103].strip()) > 0 else 0,) + (str(entry[105:106]),)
+                           + (int(entry[117:122]) if len(entry[117:122].strip()) > 0 else 0,)
+                           + (int(entry[123:126]) if len(entry[123:126].strip()) > 0 else 0,) + (str(entry[127:136]).strip(),)
+                           + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
+                           + (str(entry[194:202]).strip(),)
+                         for entry in database], dtype=dt)
+
+
+def asteroid_data_load_2(_f_database, asteroid_name, _provider='mpc'):
+    """ Load data from JPL database
+
+    :param _f_database:
+    :param asteroid_name:
+    :param _provider: 'mpc' or 'jpl'
+    :return:
+    """
+    _database = asteroid_database_load(_f_database, _provider=_provider)
+    print('lala')
+    print(_database)
+
+    ind = _database['name'] == asteroid_name
+
+    return _database[ind]
+
+
+def asteroid_data_load_3(_f_database, asteroid_name, _provider='mpc'):
+    """ Load asteroid data from database
+
+    :param _f_database:
+    :param asteroid_name:
+    :return:
+    """
+    name = ' '.join(asteroid_name.split('_'))
+
+    try:
+
+        with open(_f_database) as f:
+            lines = f.readlines()
+            entry = [line for line in lines if line.find(name) != -1][0]
+
+        if _provider == 'jpl':
+            dt = np.dtype([('name', '|S21'),
+                           ('epoch', '<i8'), ('a', '<f8'),
+                           ('e', '<f8'), ('i', '<f8'),
+                           ('w', '<f8'), ('Node', '<f8'),
+                           ('M0', '<f8'), ('H', '<f8'), ('G', '<f8')])
+            return np.array([((entry[0:6] + '_' + entry[6:25].strip(),) +
+                              tuple(map(float, entry[25:].split()[:-2])))],
+                            dtype=dt)
+
+        elif _provider == 'mpc':
+            dt = np.dtype([('designation', '|S21'), ('H', '<f8'), ('G', '<f8'),
+                           ('epoch', '<f8'), ('M0', '<f8'), ('w', '<f8'),
+                           ('Node', '<f8'), ('i', '<f8'), ('e', '<f8'),
+                           ('n', '<f8'), ('a', '<f8'), ('U', '|S21'),
+                           ('n_obs', '<f8'), ('n_opps', '<f8'), ('arc', '|S21'),
+                           ('rms', '|S21'), ('name', '|S21'), ('last_obs', '|S21')
+                          ])
+            return np.array([(str(entry[:7]).strip(),) + (float(entry[8:13]) if len(entry[8:13].strip()) > 0 else 20.0,)
+                               + (float(entry[14:19]) if len(entry[14:19].strip()) > 0 else 0.15,)
+                               + (unpack_epoch(str(entry[20:25])),) + (float(entry[26:35]),) + (float(entry[37:46]),)
+                               + (float(entry[48:57]),) + (float(entry[59:68]),) + (float(entry[70:79]),)
+                               + (float(entry[80:91]) if len(entry[80:91].strip()) > 0 else 0,)
+                               + (float(entry[92:103]) if len(entry[92:103].strip()) > 0 else 0,)
+                               + (str(entry[105:106]),)
+                               + (int(entry[117:122]) if len(entry[117:122].strip()) > 0 else 0,)
+                               + (int(entry[123:126]) if len(entry[123:126].strip()) > 0 else 0,)
+                               + (str(entry[127:136]).strip(),)
+                               + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
+                               + (str(entry[194:202]).strip(),)], dtype=dt)
+        else:
+            raise Exception('ephemeris provider not recognized')
+
+    except Exception as _e:
+        print(_e)
+        return None
 
 
 def get_state_asteroid(_asteroid, _t, _jpl_eph):
@@ -647,10 +794,16 @@ if __name__ == '__main__':
         ''' asteroids '''
         # asteroid database:
         path_to_database = config.get('Path', 'asteroid_database_path')
-        f_database = os.path.join(path_to_database, 'ELEMENTS.NUMBR')
+        # JPL:
+        # f_database = os.path.join(path_to_database, 'ELEMENTS.NUMBR')
+        # MPC:
+        f_database = os.path.join(path_to_database, 'MPCORB.dat')
 
         try:
-            asteroid = asteroid_data_load(_f_database=f_database, asteroid_name=name)
+            # asteroid = asteroid_data_load(_f_database=f_database, asteroid_name=name)
+            asteroid = asteroid_data_load_3(_f_database=f_database, asteroid_name=name, _provider='mpc')
+            # asteroid = asteroid_data_load_3(_f_database=f_database, asteroid_name=name, _provider='jpl')
+            # asteroid = asteroid_data_load_2(_f_database=f_database, asteroid_name=name, _provider='mpc')
             # print(asteroid)
         except Exception:
             # print error code 2 (failed to load asteroid database) and exit
@@ -663,6 +816,7 @@ if __name__ == '__main__':
             print(0, ra, dec, ra_rate, dec_rate)
         except Exception:
             # print error code 4 (calculation failed) and exit
+            print(traceback.print_exc())
             print(3, ra_apr, dec_apr, ra_rate_apr, dec_rate_apr)
             raise SystemExit
 

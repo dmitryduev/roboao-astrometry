@@ -1,8 +1,10 @@
 import matplotlib
 matplotlib.use('Qt5Agg')
-import numpy as num, astropy.io.fits as pyf, pylab as pyl
+import numpy as num
+import astropy.io.fits as pyf
+import pylab as pyl
 from trippy import psf, pill, psfStarChooser
-from trippy import scamp,MCMCfit
+from trippy import scamp, MCMCfit
 import scipy as sci
 from os import path
 import os
@@ -11,21 +13,22 @@ from astropy.visualization import interval
 
 
 def trimCatalog(cat):
-    good=[]
+    good = []
     for i in range(len(cat['XWIN_IMAGE'])):
         try:
-            a=int(cat['XWIN_IMAGE'][i])
-            b=int(cat['YWIN_IMAGE'][i])
-            m=num.max(data[b-4:b+5,a-4:a+5])
-        except: pass
+            a = int(cat['XWIN_IMAGE'][i])
+            b = int(cat['YWIN_IMAGE'][i])
+            m = num.max(data[b-4:b+5, a-4:a+5])
+        except:
+            pass
         dist = num.sort(((cat['XWIN_IMAGE']-cat['XWIN_IMAGE'][i])**2+(cat['YWIN_IMAGE']-cat['YWIN_IMAGE'][i])**2)**0.5)
-        d=dist[1]
-        if cat['FLAGS'][i]==0 and d>30 and m<70000:
+        d = dist[1]
+        if cat['FLAGS'][i] == 0 and d > 30 and m < 70000:
             good.append(i)
-    good=num.array(good)
-    outcat={}
+    good = num.array(good)
+    outcat = {}
     for i in cat:
-        outcat[i]=cat[i][good]
+        outcat[i] = cat[i][good]
     return outcat
 
 inputFile = 'Polonskaya.fits'
@@ -33,9 +36,9 @@ if not path.isfile(inputFile):
     os.system('wget -O Polonskaya.fits http://www.canfar.phys.uvic.ca/vospace/nodes/fraserw/Polonskaya.fits?view=data')
 
 with pyf.open(inputFile) as han:
-    data=han[0].data
-    header=han[0].header
-    EXPTIME=header['EXPTIME']
+    data = han[0].data
+    header = han[0].header
+    EXPTIME = header['EXPTIME']
 
 scamp.makeParFiles.writeSex('example.sex',
                             minArea=3.,
@@ -56,8 +59,8 @@ args = num.argsort(dist)
 xt = catalog['XWIN_IMAGE'][args][0]
 yt = catalog['YWIN_IMAGE'][args][0]
 
-rate=18.4588 # "/hr
-angle=31.11+1.1 # degrees counter clockwise from horizontal, right
+rate = 18.4588  # "/hr
+angle = 31.11+1.1  # degrees counter clockwise from horizontal, right
 
 starChooser = psfStarChooser.starChooser(data,
                                          catalog['XWIN_IMAGE'], catalog['YWIN_IMAGE'],
@@ -138,18 +141,19 @@ fitter.fitWithModelPSF(200+xt-int(xt)-1,200+yt-int(yt)-1, m_in=1000.,
                        nWalkers=20, nBurn=20, nStep=20,
                        bg=phot.bg, useLinePSF=True, verbose=False,useErrorMap=False)
 
-(fitPars,fitRange)=fitter.fitResults(0.67)
-print fitPars
-print fitRange
+(fitPars, fitRange) = fitter.fitResults(0.67)
+print(fitPars)
+print(fitRange)
 
-modelImage=goodPSF.plant(fitPars[0],fitPars[1],fitPars[2],Data,addNoise=False,useLinePSF=True,returnModel=True)
+modelImage = goodPSF.plant(fitPars[0], fitPars[1], fitPars[2], Data,
+                           addNoise=False, useLinePSF=True, returnModel=True)
 pyl.imshow(modelImage)
 pyl.show()
 
-removed=goodPSF.remove(fitPars[0],fitPars[1],fitPars[2],Data,useLinePSF=True)
+removed = goodPSF.remove(fitPars[0], fitPars[1], fitPars[2], Data, useLinePSF=True)
 
-(z1,z2)=numdisplay.zscale.zscale(removed)
-normer=interval.ManualInterval(z1,z2)
+(z1, z2) = numdisplay.zscale.zscale(removed)
+normer = interval.ManualInterval(z1, z2)
 
 pyl.imshow(normer(Data))
 pyl.show()
