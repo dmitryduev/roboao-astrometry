@@ -214,13 +214,19 @@ class TargetListAsteroids(object):
         Produce (nightly) target list for the asteroids project
     """
 
-    def __init__(self, _f_inp, database_source='mpc', _observatory='kitt peak', _m_lim=16.0,
-                 date=None, timezone='America/Phoenix'):
+    def __init__(self, _f_inp, database_source='mpc', database_file=None, _observatory='kitt peak',
+                 _m_lim=16.0, _elv_lim=40.0, date=None, timezone='America/Phoenix'):
         # init database
         if database_source == 'mpc':
-            db = AsteroidDatabaseMPC()
+            if database_file is None:
+                db = AsteroidDatabaseMPC()
+            else:
+                db = AsteroidDatabaseMPC(_f_database=database_file)
         elif database_source == 'jpl':
-            db = AsteroidDatabaseJPL()
+            if database_file is None:
+                db = AsteroidDatabaseJPL()
+            else:
+                db = AsteroidDatabaseJPL(_f_database=database_file)
         else:
             raise Exception('database source not understood')
         # load the database
@@ -232,6 +238,9 @@ class TargetListAsteroids(object):
 
         # minimum object magnitude to be output
         self.m_lim = _m_lim
+
+        # elevation cutoff
+        self.elv_lim = _elv_lim
 
         # inp file for running pypride:
         inp = inp_set(_f_inp)
@@ -266,6 +275,9 @@ class TargetListAsteroids(object):
         v = R_123(3, -lon)
         # product of the two matrices:
         self.vw = np.dot(v, w)
+
+        ''' targets '''
+        self.targets = None
 
     def get_hour_angle_limit(self, night, ra, dec):
         # calculate meridian transit time to set hour angle limit.
@@ -480,23 +492,24 @@ class TargetListAsteroids(object):
             target_list = np.array(target_list)
             print('serial computation took: {:.2f} s'.format(_time() - ttic))
         # print('Total targets brighter than 16.5', len(target_list))
-        return target_list
 
-    def target_list_observable(self, target_list, day,
-                               elv_lim=40.0, twilight='nautical', fraction=0.1):
+        self.targets = target_list
+
+    def target_list_observable(self, day, twilight='nautical', fraction=0.1):
         """ Check whether targets are observable and return only those
 
-        :param target_list:
         :param day:
-        :param elv_lim:
         :param twilight:
         :param fraction:
         :return:
         """
+        if self.targets is None:
+            print('no targets in the target list')
+            return
 
         night, middle_of_night = self.middle_of_night(day)
-        # set constraints (above elv_lim deg altitude, Sun altitude < -N deg [dep.on twilight])
-        constraints = [AltitudeConstraint(elv_lim * u.deg, 90 * u.deg)]
+        # set constraints (above self.elv_lim deg altitude, Sun altitude < -N deg [dep.on twilight])
+        constraints = [AltitudeConstraint(self.elv_lim * u.deg, 90 * u.deg)]
         if twilight == 'nautical':
             constraints.append(AtNightConstraint.twilight_nautical())
         elif twilight == 'astronomical':
@@ -504,7 +517,7 @@ class TargetListAsteroids(object):
         elif twilight == 'civil':
             constraints.append(AtNightConstraint.twilight_civil())
 
-        radec = np.array(list(target_list[:, 2]))
+        radec = np.array(list(self.targets[:, 2]))
         # tic = _time()
         coords = SkyCoord(ra=radec[:, 0], dec=radec[:, 1],
                           unit=(u.rad, u.rad), frame='icrs')
@@ -513,15 +526,16 @@ class TargetListAsteroids(object):
         table = observability_table(constraints, self.observatory, coords,
                                     time_range=night)
         print('observability computation took: {:.2f} s'.format(_time() - tic))
-        print(table)
+        # print(table)
 
         # proceed with observable (for more than 5% of the night) targets only
         mask_observable = table['fraction of time observable'] > fraction
 
-        target_list_observeable = target_list[mask_observable]
-        print('total bright asteroids: ', len(target_list),
+        target_list_observeable = self.targets[mask_observable]
+        print('total bright asteroids: ', len(self.targets),
               'observable: ', len(target_list_observeable))
-        return target_list_observeable
+
+        self.targets = target_list_observeable
 
     def getObsParams(self, target, mjd):
         """ Compute obs parameters for a given t
@@ -573,6 +587,62 @@ class TargetListAsteroids(object):
         middle_of_night = time_grid[len(time_grid) / 2]
 
         return night, middle_of_night
+
+    def get_observing_windows(self):
+        """
+            Get observing windows for when the targets in the target list are above elv_lim
+        :param elv_lim:
+        :return:
+        """
+        if self.targets is None:
+            print('no targets in the target list')
+            return
+
+        # print(self.targets)
+        target_scans = []
+        for target in self.targets:
+            t_el = np.array(target[-1])
+            # print(t_el)
+            # print(t_el.shape)
+            N = t_el.shape[0]
+            t = np.linspace(0, 1, N)
+            p = np.polyfit(t, map(float, t_el[:, 1]), 4)
+            N_dense = 200
+            t_dense = np.linspace(0, 1, N_dense)
+            dense = np.polyval(p, t_dense)
+
+            scans = []
+            scan = []
+            # print(self.elv_lim)
+            for t_d, el in zip(t_dense, dense):
+                # print(t_d, el)
+                if el >= self.elv_lim:
+                    scan.append(t_d)
+                    # print('appended ', t_d, ' for ', el)
+                else:
+                    if len(scan) > 1:
+                        # print('scan ended: ', [scan[0], scan[-1]])
+                        scans.append([scan[0], scan[-1]])
+                    scan = []
+            # append last scan:
+            if len(scan) > 1:
+                # print('scan ended: ', [scan[0], scan[-1]])
+                scans.append([scan[0], scan[-1]])
+            # convert to Time objects:
+            if len(scans) > 0:
+                t_0 = Time(t_el[0, 0], format='iso')
+                t_e = Time(t_el[-1, 0], format='iso')
+                dt = t_e - t_0
+                scans = t_0 + scans * dt
+
+            target_scans.append(scans)
+
+        target_scans = np.array(target_scans)
+        # print(target_scans)
+        # print(self.targets.shape, np.expand_dims(target_scans, 1).shape)
+        # append scan times to target list
+        self.targets = np.hstack([self.targets, np.expand_dims(target_scans, 1)])
+        # print(self.targets)
 
 
 class AsteroidDatabase(object):
@@ -1207,7 +1277,6 @@ if __name__ == '__main__':
     fraction = float(config.get('Asteroids', 'fraction'))
     # magnitude limit:
     m_lim = float(config.get('Asteroids', 'm_lim'))
-    m_lim = 18
     # elevation cut-off [deg]:
     elv_lim = float(config.get('Asteroids', 'elv_lim'))
 
@@ -1242,9 +1311,14 @@ if __name__ == '__main__':
     now = datetime.datetime.now(pytz.timezone(timezone))
     today = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=1)
 
-    tl = TargetListAsteroids(f_inp, database_source='mpc', _observatory=observatory, _m_lim=m_lim, date=today)
+    tl = TargetListAsteroids(f_inp, database_source='mpc', database_file='PHA.txt',
+                             _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, date=today)
+    # get all bright targets given m_lim
     mask = None
-    targets = tl.target_list_observable(tl.target_list_all(today, mask, parallel=True), today,
-                                        elv_lim=elv_lim, twilight=twilight, fraction=fraction)
+    tl.target_list_all(today, mask, parallel=True)
+    # get observable given elv_lim
+    tl.target_list_observable(today, twilight=twilight, fraction=fraction)
+    # get observing windows
+    tl.get_observing_windows()
 
-    print(targets)
+    print(tl.targets)
