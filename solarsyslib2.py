@@ -16,8 +16,13 @@ from astroplan import observability_table  # , is_observable, is_always_observab
 # from astroplan.plots import plot_sky
 from astroplan import time_grid_from_range
 from astroplan import AtNightConstraint, AltitudeConstraint
-from astropy import units as u
 from astropy.coordinates import SkyCoord
+import astropy.coordinates as coord
+import astropy.units as u
+from scipy.ndimage import gaussian_filter
+from astropy.convolution import convolve_fft
+from astropy import wcs
+from astropy.io import fits
 from astropy.time import Time
 from time import time as _time
 import multiprocessing
@@ -25,6 +30,130 @@ import pytz
 from numba import jit
 from copy import deepcopy
 import traceback
+from astroquery.vizier import Vizier
+
+import matplotlib
+matplotlib.use('Qt5Agg')
+
+import matplotlib.pyplot as plt
+import aplpy
+
+
+# initialize Vizier object
+viz = Vizier()
+viz.ROW_LIMIT = -1
+viz.TIMEOUT = 3600
+
+
+def get_line(start, end):
+    """Bresenham's Line Algorithm
+    Produces a list of tuples from start and end
+
+    >>> points1 = get_line((0, 0), (3, 4))
+    >>> points2 = get_line((3, 4), (0, 0))
+    >>> assert(set(points1) == set(points2))
+    >>> print points1
+    [(0, 0), (1, 1), (1, 2), (2, 3), (3, 4)]
+    >>> print points2
+    [(3, 4), (2, 3), (1, 2), (1, 1), (0, 0)]
+    """
+    # Setup initial conditions
+    x1, y1 = start
+    x2, y2 = end
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Determine how steep the line is
+    is_steep = abs(dy) > abs(dx)
+
+    # Rotate line
+    if is_steep:
+        x1, y1 = y1, x1
+        x2, y2 = y2, x2
+
+    # Swap start and end points if necessary and store swap state
+    swapped = False
+    if x1 > x2:
+        x1, x2 = x2, x1
+        y1, y2 = y2, y1
+        swapped = True
+
+    # Recalculate differentials
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Calculate error
+    error = int(dx / 2.0)
+    ystep = 1 if y1 < y2 else -1
+
+    # Iterate over bounding box generating points between start and end
+    y = y1
+    points = []
+    for x in range(x1, x2 + 1):
+        coord = (y, x) if is_steep else (x, y)
+        points.append(coord)
+        error -= abs(dy)
+        if error < 0:
+            y += ystep
+            error += dx
+
+    # Reverse the list if the coordinates were swapped
+    if swapped:
+        points.reverse()
+    return points
+
+
+def generate_image(xy, mag, xy_ast=None, mag_ast=None, exp=None, nx=2048, ny=2048, psf=None):
+    """
+
+    :param xy:
+    :param mag:
+    :param xy_ast:
+    :param mag_ast:
+    :param exp: exposure in seconds to 'normalize' streak
+    :param nx:
+    :param ny:
+    :param psf:
+    :return:
+    """
+    if isinstance(xy, list):
+        xy = np.array(xy)
+    if isinstance(mag, list):
+        mag = np.array(mag)
+
+    image = np.zeros((ny, nx))
+
+    # let us assume that a 6 mag star would have a flux of 10^7 counts
+    flux_0 = 1e9
+    # scale other stars wrt that:
+    flux = flux_0 * 10 ** (0.4 * (6 - mag))
+    # print(flux)
+
+    # add stars to image
+    for k, (i, j) in enumerate(xy):
+        if i < nx and j < ny:
+            image[int(j), int(i)] = flux[k]
+
+    if exp is None:
+        exp = 1.0
+    # add asteroid
+    if xy_ast is not None and mag_ast is not None:
+        flux = flux_0 * 10 ** (0.4 * (6 - mag_ast))
+        # print(flux)
+        xy_ast = np.array(xy_ast, dtype=np.int)
+        line_points = get_line(xy_ast[0, :], xy_ast[1, :])
+        for (i, j) in line_points:
+            if i < nx and j < ny:
+                image[int(j), int(i)] = flux / exp
+
+    if psf is None:
+        # Convolve with a gaussian
+        image = gaussian_filter(image, 7)
+    else:
+        # convolve with a (model) psf
+        image = convolve_fft(image, psf)
+
+    return image
 
 
 @jit
@@ -209,6 +338,334 @@ def sta_compute_position(sta, eops, _date):
     return sta[0]
 
 
+class Target(object):
+    """
+        Store data for a single object at epoch
+    """
+    def __init__(self, _object):
+        self.object = _object
+        # position at the middle of the night:
+        self.epoch = None
+        self.radec = None
+        self.radec_dot = None
+        self.mag = None
+        self.meridian_crossing = None
+        self.is_observable = None
+        self.t_el = None
+        self.observability_windows = None
+        self.guide_stars = None
+
+    def __str__(self):
+        """
+            Print it out nicely
+        """
+        out_str = '<Target object: {:s} '.format(str(self.object))
+        if self.epoch is not None:
+            out_str += '\n epoch: {:s}'.format(str(self.epoch))
+        if self.mag is not None:
+            out_str += '\n magnitude: {:.3f}'.format(self.mag)
+        if self.radec is not None:
+            out_str += '\n ra: {:.10f} rad, dec: {:.10f} rad'.format(*self.radec)
+        if self.radec_dot is not None:
+            out_str += '\n ra_dot: {:.3f} arcsec/sec, dec_dot: {:.3f} arcsec/sec'.format(*self.radec_dot)
+        if self.meridian_crossing is not None:
+            out_str += '\n meridian crossing: {:s}'.format(str(self.meridian_crossing))
+        if self.is_observable is not None:
+            out_str += '\n is observable: {:s}'.format(str(self.is_observable))
+        # if self.t_el is not None:
+        #     out_str += '\n time elv: {:s}'.format(str(self.t_el))
+        if self.observability_windows is not None:
+            out_str += '\n observability windows: {:s}'.format(str(self.observability_windows))
+        if self.guide_stars is not None:
+            out_str += '\n guide stars: {:s}'.format(np.array(self.guide_stars))
+        return out_str + '>'
+
+    def set_epoch(self, _epoch):
+        """
+            Position at the middle of the night
+        :param _epoch:
+        :return:
+        """
+        self.epoch = _epoch
+        # reset everything else if epoch is changed
+        self.radec = None
+        self.radec_dot = None
+        self.mag = None
+        self.meridian_crossing = None
+        self.is_observable = None
+        self.t_el = None
+        self.observability_windows = None
+        self.guide_stars = None
+
+    def set_radec(self, _radec):
+        self.radec = _radec
+
+    def set_radec_dot(self, _radec_dot):
+        self.radec_dot = _radec_dot
+
+    def set_mag(self, _mag):
+        self.mag = _mag
+
+    def set_meridian_crossing(self, _meridian_crossing):
+        self.meridian_crossing = _meridian_crossing
+
+    def set_is_observable(self, _is_observable):
+        self.is_observable = _is_observable
+
+    def set_t_el(self, _t_el):
+        self.t_el = _t_el
+
+    def set_observability_windows(self, _elv_lim=45.0):
+
+        # get elv vs time:
+        t_el = np.array(self.t_el)
+        # print(t_el)
+        # print(t_el.shape)
+        N = t_el.shape[0]
+        t = np.linspace(0, 1, N)
+        # fit elv vs time with a poly
+        p = np.polyfit(t, map(float, t_el[:, 1]), 6)
+        # evaluate it on a denser grid to estimate periods when elv >= min_elv more precisely
+        N_dense = 200
+        t_dense = np.linspace(0, 1, N_dense)
+        dense = np.polyval(p, t_dense)
+
+        scans = []
+        scan = []
+        # print(self.elv_lim)
+        for t_d, el in zip(t_dense, dense):
+            # print(t_d, el)
+            if el >= _elv_lim:
+                scan.append(t_d)
+                # print('appended ', t_d, ' for ', el)
+            else:
+                if len(scan) > 1:
+                    # print('scan ended: ', [scan[0], scan[-1]])
+                    scans.append([scan[0], scan[-1]])
+                scan = []
+        # append last scan:
+        if len(scan) > 1:
+            # print('scan ended: ', [scan[0], scan[-1]])
+            scans.append([scan[0], scan[-1]])
+        # convert to Time objects:
+        if len(scans) > 0:
+            t_0 = Time(t_el[0, 0], format='iso')
+            t_e = Time(t_el[-1, 0], format='iso')
+            dt = t_e - t_0
+            scans = t_0 + scans * dt
+
+        self.observability_windows = scans
+
+    def set_guide_stars(self, _jpl_eph, _guide_star_cat=u'I/337/gaia', _station=None,
+                        _radius=30.0, _margin=30.0, _m_lim_gs=16.0, _plot_field=False,
+                        _model_psf=None):
+        """
+            Get guide stars within radius arcseconds for each observability window.
+        :param _jpl_eph:
+        :param _station:
+        :param _radius: maximum distance to guide star in arcseconds
+        :param _margin: padd window with margin arcsec (one-sided margin)
+        :return:
+        """
+        if self.observability_windows is None:
+            print('compute observability windows first before looking for guide stars')
+            return
+        elif len(self.observability_windows) == 0 or not self.is_observable:
+            print('target {:s} not observable'.format(self.object.name))
+            return
+        else:
+            print('target {:s} observable:'.format(self.object.name))
+            # init list to keep guide stars
+            self.guide_stars = []
+            # search radius: " -> rad
+            radius_rad = _radius * np.pi / 180.0 / 3600
+
+        # print(self.object.name)
+        for window in self.observability_windows:
+            # start of the 'arc'
+            t_start = window[0]
+            radec_start, _, vmag_start = self.object.raDecVmag(t_start.mjd, _jpl_eph, epoch='J2000',
+                                                               station=_station, output_Vmag=True)
+            radec_start = np.array(radec_start)
+            # end of the 'arc'
+            t_stop = window[1]
+            radec_stop, _, vmag_stop = self.object.raDecVmag(t_stop.mjd, _jpl_eph, epoch='J2000',
+                                                             station=_station, output_Vmag=True)
+            radec_stop = np.array(radec_stop)
+            # middle point for the 'FoV':
+            radec_middle = (radec_start + radec_stop) / 2.0
+            # 'FoV' size + margins at both sides:
+            window_size = np.abs(radec_stop - radec_start) + 2.0*np.array([_margin*np.pi/180.0/3600,
+                                                                           _margin*np.pi/180.0/3600])
+            # in arcsec:
+            # print(window_size*180.0/np.pi*3600)
+
+            # window time span
+            window_t_span = t_stop - t_start
+
+            target = coord.SkyCoord(ra=radec_middle[0], dec=radec_middle[1], unit=(u.rad, u.rad), frame='icrs')
+            global viz
+            # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
+            grid_stars = viz.query_region(target, width=window_size[0]*u.rad, height=window_size[1]*u.rad,
+                                          catalog=_guide_star_cat)
+            # print(guide_stars[_guide_star_cat])
+            # guide star magnitudes:
+            grid_star_mags = np.array(grid_stars[_guide_star_cat]['__Gmag_'])
+            # those that are bright enough for tip-tilt:
+            mag_mask = grid_star_mags <= _m_lim_gs
+
+            if _plot_field:
+                self.plot_field(target, window_size=window_size,
+                                radec_start=radec_start, vmag_start=vmag_start,
+                                radec_stop=radec_stop, vmag_stop=vmag_stop,
+                                exposure=t_stop-t_start,
+                                _model_psf=_model_psf, grid_stars=grid_stars[_guide_star_cat])
+
+            # compute distances from stars, return those (bright ones) that can be used as guide stars
+            for star in grid_stars[_guide_star_cat][mag_mask]:
+                radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0
+                # print(star)
+                print(radec_star)
+                print(radec_start, radec_stop)
+                '''
+                # Consider the line extending the segment, parameterized as v + t (w - v).
+                # We find projection of point p onto the line.
+                # It falls where t = [(p-v) . (w-v)] / |w-v|^2
+                # We clamp t from [0,1] to handle points outside the segment vw.
+                '''
+                vw = radec_stop - radec_start
+                l = np.linalg.norm(vw)
+                l2 = l ** 2
+                t = np.max([0, np.min([1, np.dot(radec_star - radec_start, vw) / l2])])
+                projection = radec_start + t * vw
+
+                distance = np.linalg.norm(radec_star - projection)
+
+                # not too far away?
+                if radius_rad >= distance:
+
+                    window_border = np.sqrt(radius_rad ** 2 - distance ** 2)
+                    delta_t_start = np.max([0, t - window_border / l])
+                    # start (linear) RA/Dec position
+                    # window_start = radec_start + delta_t_start * vw
+                    delta_t_stop = np.min([1, t + window_border / l])
+                    # stop (linear) RA/Dec position
+                    # window_stop = radec_start + delta_t_stop * vw
+                    # print(window_start, window_stop)
+                    # delta_t_'s must be multiplied by the full streak time span to get the plausible time range:
+                    # print(delta_t_start, delta_t_stop)
+                    t_start_star = t_start + delta_t_start * window_t_span
+                    t_stop_star = t_start + delta_t_stop * window_t_span
+                    # save:
+                    self.guide_stars.append([star, distance, [t_start_star, t_stop_star]])
+                # else:
+                #     print('too far away')
+
+    @staticmethod
+    def plot_field(target, window_size, radec_start, vmag_start, radec_stop, vmag_stop,
+                   exposure, _model_psf, grid_stars):
+        """
+
+        :return:
+        """
+        ''' set up WCS '''
+        # Create a new WCS object.  The number of axes must be set
+        # from the start
+        w = wcs.WCS(naxis=2)
+        w._naxis1 = int(2048 * (window_size[0]*180.0/np.pi*3600) / 36)
+        w._naxis2 = int(2048 * (window_size[1]*180.0/np.pi*3600) / 36)
+        w.naxis1 = w._naxis1
+        w.naxis2 = w._naxis2
+
+        if w.naxis1 > 20000 or w.naxis2 > 20000:
+            print('image too big to plot')
+            return
+
+        # Set up a tangential projection
+        w.wcs.equinox = 2000.0
+        # position of the tangential point on the detector [pix]
+        w.wcs.crpix = np.array([w.naxis1 // 2, w.naxis2 // 2])
+        # sky coordinates of the tangential point
+        w.wcs.crval = [target.ra.deg, target.dec.deg]
+        w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        # linear mapping detector :-> focal plane [deg/pix]
+        # actual:
+        # w.wcs.cd = np.array([[-4.9653758578816782e-06, 7.8012027500556068e-08],
+        #                      [8.9799574245829621e-09, 4.8009647689165968e-06]])
+        # with RA inverted to correspond to previews
+        w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
+                             [8.9799574245829621e-09, 4.8009647689165968e-06]])
+
+        # set up quadratic distortions [xy->uv and uv->xy]
+        # w.sip = wcs.Sip(a=np.array([-1.7628536101583434e-06, 5.2721963537675933e-08, -1.2395119995283236e-06]),
+        #                 b=np.array([2.5686775443756446e-05, -6.4405711579912514e-06, 3.6239787339845234e-05]),
+        #                 ap=np.array([-7.8730574242135546e-05, 1.6739809945514789e-06,
+        #                              -1.9638469711488499e-08, 5.6147572815095856e-06,
+        #                              1.1562096854108367e-06]),
+        #                 bp=np.array([1.6917947345178044e-03,
+        #                              -2.6065393907218176e-05, 6.4954883952398105e-06,
+        #                              -4.5911421583810606e-04, -3.5974854928856988e-05]),
+        #                 crpix=w.wcs.crpix)
+
+        ''' create a [fake] simulated image '''
+        # apply linear transformation only:
+        pix_stars = np.array(w.wcs_world2pix(grid_stars['RA_ICRS'], grid_stars['DE_ICRS'], 0)).T
+        # apply linear + SIP:
+        # pix_stars = np.array(w.all_world2pix(grid_stars['_RAJ2000'], grid_stars['_DEJ2000'], 0)).T
+        # pix_stars = np.array(w.all_world2pix(grid_stars['RA_ICRS'], grid_stars['DE_ICRS'], 0)).T
+        mag_stars = np.array(grid_stars['__Gmag_'])
+        # print(pix_stars)
+        # print(mag_stars)
+
+        asteroid_start = coord.SkyCoord(ra=radec_start[0], dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs')
+        asteroid_stop = coord.SkyCoord(ra=radec_stop[0], dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
+
+        pix_asteroid = np.array([w.wcs_world2pix(asteroid_start.ra.deg, asteroid_start.dec.deg, 0),
+                                 w.wcs_world2pix(asteroid_stop.ra.deg, asteroid_stop.dec.deg, 0)])
+        mag_asteroid = np.mean([vmag_start, vmag_stop])
+        # print(pix_asteroid)
+        # print(mag_asteroid)
+
+        sim_image = generate_image(xy=pix_stars, mag=mag_stars,
+                                   xy_ast=pix_asteroid, mag_ast=mag_asteroid, exp=exposure.sec,
+                                   nx=w.naxis1, ny=w.naxis2, psf=_model_psf)
+
+        # convert simulated image to fits hdu:
+        hdu = fits.PrimaryHDU(sim_image, header=w.to_header())
+
+        ''' plot! '''
+        # plot empty grid defined by wcs:
+        # fig = aplpy.FITSFigure(w)
+        # plot fake image:
+        fig = aplpy.FITSFigure(hdu)
+
+        # fig.set_theme('publication')
+
+        fig.add_grid()
+
+        fig.grid.show()
+        fig.grid.set_color('gray')
+        fig.grid.set_alpha(0.8)
+
+        ''' display field '''
+        # fig.show_colorscale(cmap='viridis')
+        fig.show_colorscale(cmap='magma')
+        # fig.show_grayscale()
+        # fig.show_markers(grid_stars[cat]['_RAJ2000'], grid_stars[cat]['_DEJ2000'],
+        #                  layer='marker_set_1', edgecolor='white',
+        #                  facecolor='white', marker='o', s=30, alpha=0.7)
+
+        # add asteroid 'from'->'to'
+        fig.show_markers(asteroid_start.ra.deg, asteroid_start.dec.deg,
+                         layer='marker_set_1', edgecolor=plt.cm.Blues(0.2),
+                         facecolor=plt.cm.Blues(0.3), marker='o', s=50, alpha=0.7)
+        fig.show_markers(asteroid_stop.ra.deg, asteroid_stop.dec.deg,
+                         layer='marker_set_2', edgecolor=plt.cm.Oranges(0.5),
+                         facecolor=plt.cm.Oranges(0.3), marker='x', s=50, alpha=0.7)
+
+        plt.show()
+
+
 class TargetListAsteroids(object):
     """
         Produce (nightly) target list for the asteroids project
@@ -277,16 +734,15 @@ class TargetListAsteroids(object):
         self.vw = np.dot(v, w)
 
         ''' targets '''
-        self.targets = None
+        self.targets = np.array([], dtype=object)
 
     def get_hour_angle_limit(self, night, ra, dec):
         # calculate meridian transit time to set hour angle limit.
         # no need to observe a planet when it's low if can wait until it's high.
         # get next transit after night start:
-        meridian_transit_time = self.observatory.\
-                                target_meridian_transit_time(night[0],
-                                      SkyCoord(ra=ra * u.rad, dec=dec * u.rad),
-                                      which='next')
+        meridian_transit_time = self.observatory.target_meridian_transit_time(night[0],
+                                                                              SkyCoord(ra=ra * u.rad, dec=dec * u.rad),
+                                                                              which='next')
 
         # will it happen during the night?
         # print('astroplan ', meridian_transit_time.iso)
@@ -420,7 +876,7 @@ class TargetListAsteroids(object):
         # print('pypride ', (time[0] + root * u.day).iso)
         # return bool if crosses the meridian and array with elevations
         return (time[0] + root*u.day < time[1]) and (np.max((minus, plus)) < maxp), \
-               zip(times.iso, altitudes*180/np.pi)
+                zip(times.iso, altitudes*180/np.pi)
 
     def target_list_all(self, day, mask=None, parallel=False):
         """
@@ -453,7 +909,7 @@ class TargetListAsteroids(object):
             targets_all = result.get()
             # print(targets_all)
             # get only the asteroids that are bright enough
-            target_list = [[database_masked[_it]] + [middle_of_night] + _t
+            target_list = [[AsteroidDatabase.init_asteroid(database_masked[_it])] + [middle_of_night] + _t
                             for _it, _t in enumerate(targets_all) if _t[2] <= self.m_lim]
 
             # set hour angle limit if asteroid crosses the meridian during the night
@@ -487,13 +943,23 @@ class TargetListAsteroids(object):
                     # ticcc = _time()
                     meridian_transit, t_azel = self.get_hour_angle_limit2(night, radec[0], radec[1], N=20)
                     # print(_time() - ticcc, meridian_transit)
-                    target_list.append([asteroid, middle_of_night,
+                    target_list.append([AsteroidDatabase.init_asteroid(asteroid), middle_of_night,
                                         radec, radec_dot, Vmag, meridian_transit, t_azel])
             target_list = np.array(target_list)
             print('serial computation took: {:.2f} s'.format(_time() - ttic))
         # print('Total targets brighter than 16.5', len(target_list))
 
-        self.targets = target_list
+        # set up target objects for self.targets:
+        for entry in target_list:
+            target = Target(_object=entry[0])
+            target.set_epoch(entry[1])
+            target.set_radec(entry[2])
+            target.set_radec_dot(entry[3])
+            target.set_mag(entry[4])
+            target.set_meridian_crossing(entry[5])
+            target.set_t_el(entry[6])
+            self.targets = np.append(self.targets, target)
+        # print(self.targets)
 
     def target_list_observable(self, day, twilight='nautical', fraction=0.1):
         """ Check whether targets are observable and return only those
@@ -517,7 +983,8 @@ class TargetListAsteroids(object):
         elif twilight == 'civil':
             constraints.append(AtNightConstraint.twilight_civil())
 
-        radec = np.array(list(self.targets[:, 2]))
+        radec = np.array([_target.radec for _target in self.targets])
+        # print(radec)
         # tic = _time()
         coords = SkyCoord(ra=radec[:, 0], dec=radec[:, 1],
                           unit=(u.rad, u.rad), frame='icrs')
@@ -530,12 +997,17 @@ class TargetListAsteroids(object):
 
         # proceed with observable (for more than 5% of the night) targets only
         mask_observable = table['fraction of time observable'] > fraction
+        print(mask_observable)
 
         target_list_observeable = self.targets[mask_observable]
         print('total bright asteroids: ', len(self.targets),
               'observable: ', len(target_list_observeable))
 
-        self.targets = target_list_observeable
+        # self.targets = target_list_observeable
+        for target in self.targets[mask_observable]:
+            target.set_is_observable(True)
+        for target in self.targets[~mask_observable]:
+            target.set_is_observable(False)
 
     def getObsParams(self, target, mjd):
         """ Compute obs parameters for a given t
@@ -591,58 +1063,40 @@ class TargetListAsteroids(object):
     def get_observing_windows(self):
         """
             Get observing windows for when the targets in the target list are above elv_lim
-        :param elv_lim:
         :return:
         """
-        if self.targets is None:
+        if len(self.targets) == 0:
             print('no targets in the target list')
             return
 
         # print(self.targets)
-        target_scans = []
         for target in self.targets:
-            t_el = np.array(target[-1])
-            # print(t_el)
-            # print(t_el.shape)
-            N = t_el.shape[0]
-            t = np.linspace(0, 1, N)
-            p = np.polyfit(t, map(float, t_el[:, 1]), 4)
-            N_dense = 200
-            t_dense = np.linspace(0, 1, N_dense)
-            dense = np.polyval(p, t_dense)
+            target.set_observability_windows(_elv_lim=self.elv_lim)
 
-            scans = []
-            scan = []
-            # print(self.elv_lim)
-            for t_d, el in zip(t_dense, dense):
-                # print(t_d, el)
-                if el >= self.elv_lim:
-                    scan.append(t_d)
-                    # print('appended ', t_d, ' for ', el)
-                else:
-                    if len(scan) > 1:
-                        # print('scan ended: ', [scan[0], scan[-1]])
-                        scans.append([scan[0], scan[-1]])
-                    scan = []
-            # append last scan:
-            if len(scan) > 1:
-                # print('scan ended: ', [scan[0], scan[-1]])
-                scans.append([scan[0], scan[-1]])
-            # convert to Time objects:
-            if len(scans) > 0:
-                t_0 = Time(t_el[0, 0], format='iso')
-                t_e = Time(t_el[-1, 0], format='iso')
-                dt = t_e - t_0
-                scans = t_0 + scans * dt
+    def get_guide_stars(self, _guide_star_cat=u'I/337/gaia', _radius=30.0, _margin=30.0, _m_lim_gs=16.0,
+                        _plot_field=False, _psf_fits=None):
+        """
+            Get astrometric guide stars for each observing window
+        :return:
+        """
+        if len(self.targets) == 0:
+            print('no targets in the target list')
+            return
 
-            target_scans.append(scans)
+        if _plot_field and _psf_fits is not None:
+            try:
+                with fits.open(_psf_fits) as hdulist:
+                    model_psf = hdulist[0].data
+            except IOError:
+                # couldn't load? use a simple Gaussian then
+                model_psf = None
+        else:
+            model_psf = None
 
-        target_scans = np.array(target_scans)
-        # print(target_scans)
-        # print(self.targets.shape, np.expand_dims(target_scans, 1).shape)
-        # append scan times to target list
-        self.targets = np.hstack([self.targets, np.expand_dims(target_scans, 1)])
-        # print(self.targets)
+        for target in self.targets:
+            target.set_guide_stars(_jpl_eph=self.inp['jpl_eph'], _guide_star_cat=_guide_star_cat,
+                                   _station=self.observatory_pypride, _radius=_radius, _margin=_margin,
+                                   _m_lim_gs=_m_lim_gs, _plot_field=_plot_field, _model_psf=model_psf)
 
 
 class AsteroidDatabase(object):
@@ -1280,6 +1734,14 @@ if __name__ == '__main__':
     # elevation cut-off [deg]:
     elv_lim = float(config.get('Asteroids', 'elv_lim'))
 
+    # guide star settings:
+    guide_star_cat = config.get('Vizier', 'guide_star_cat')
+    radius = float(config.get('Vizier', 'radius'))
+    margin = float(config.get('Vizier', 'margin'))
+    m_lim_gs = float(config.get('Vizier', 'm_lim_gs'))
+    plot_field = eval(config.get('Vizier', 'plot_field'))
+    psf_fits = config.get('Vizier', 'psf_fits')
+
     run_tests = False
     if run_tests:
         print('running tests...')
@@ -1320,5 +1782,9 @@ if __name__ == '__main__':
     tl.target_list_observable(today, twilight=twilight, fraction=fraction)
     # get observing windows
     tl.get_observing_windows()
+    # get guide stars
+    tl.get_guide_stars(_guide_star_cat=guide_star_cat, _radius=radius, _margin=margin, _m_lim_gs=m_lim_gs,
+                       _plot_field=plot_field, _psf_fits=psf_fits)
 
-    print(tl.targets)
+    for tr in tl.targets:
+        print(tr)
