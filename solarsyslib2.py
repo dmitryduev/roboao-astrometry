@@ -9,7 +9,7 @@ from pypride.vintflib import pleph
 from pypride.classes import inp_set, constants
 from pypride.vintlib import eop_update, internet_on, load_cats, mjuliandate, taitime, eop_iers, t_eph, ter2cel
 from pypride.vintlib import sph2cart, cart2sph, iau_PNM00A
-from pypride.vintlib import factorise, aber_source, R_123
+from pypride.vintlib import factorise, aber_source, R_123, iau_RX, iau_RY, iau_RZ
 from astroplan import Observer as Observer_astroplan
 # from astroplan import FixedTarget
 from astroplan import observability_table  # , is_observable, is_always_observable
@@ -43,6 +43,35 @@ import aplpy
 viz = Vizier()
 viz.ROW_LIMIT = -1
 viz.TIMEOUT = 3600
+
+
+def rotation(_vec, _radec_start, _angle_stop):
+    """
+        Align vector _vec with a coordinate system defined by a great circle segment on
+        the celestial sphere
+        Transform Cartesian vector _vec to a coordinate system, whose X axis is aligned with
+        _radec_start (start point of the segment) and the endpoint of the segment lies in the XY plane
+         so that the coordinates of the stop point are (cos(theta), sin(theta), 0), where
+         theta is the angle between radec_start and radec_stop
+    :param _vec:
+    :param _radec_start:
+    :param _angle_stop:
+    :return:
+    """
+    return iau_RX(_angle_stop, iau_RY(-_radec_start[1], iau_RZ(_radec_start[0], _vec)))
+
+
+def rotate_radec(_radec, _radec_start, _angle_stop):
+    """
+        Rotate _radec to the system described in the definition of rotation()
+    :param _radec: [RA, Dec] in rad
+    :param _radec_start: [RA, Dec] in rad
+    :param _angle_stop: rad
+    :return: [lon, lat] in rad (corresponding to RA and Dec)
+    """
+    rdecra = np.hstack([1.0, _radec[::-1]])
+    cart = sph2cart(rdecra)
+    return cart2sph(rotation(cart, _radec_start, _angle_stop))[:-3:-1]
 
 
 def get_line(start, end):
@@ -359,7 +388,7 @@ class Target(object):
         """
             Print it out nicely
         """
-        out_str = '<Target object: {:s} '.format(str(self.object))
+        out_str = '<<Target object: {:s} '.format(str(self.object))
         if self.epoch is not None:
             out_str += '\n epoch: {:s}'.format(str(self.epoch))
         if self.mag is not None:
@@ -378,7 +407,7 @@ class Target(object):
             out_str += '\n observability windows: {:s}'.format(str(self.observability_windows))
         if self.guide_stars is not None:
             out_str += '\n guide stars: {:s}'.format(np.array(self.guide_stars))
-        return out_str + '>'
+        return out_str + '>>'
 
     def set_epoch(self, _epoch):
         """
@@ -521,45 +550,92 @@ class Target(object):
                                 exposure=t_stop-t_start,
                                 _model_psf=_model_psf, grid_stars=grid_stars[_guide_star_cat])
 
-            # compute distances from stars, return those (bright ones) that can be used as guide stars
+            ''' compute distances from stars, return those (bright ones) that can be used as guide stars '''
+            # to compute distance from a star to a great circle segment,
+            # we first rotate the (Cartesian) coordinate system so that the start point of the segment radec_start
+            # (position of asteroid at the beginning of the window) has the coordinates (1,0,0) in
+            # the new system. To do that, first rotate around Z by RA (of radec_start) and then around Y by -Dec
+
+            # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
+            rdecra_start = np.hstack([1.0, radec_start[::-1]])
+            rdecra_stop = np.hstack([1.0, radec_stop[::-1]])
+            start_cart = sph2cart(rdecra_start)
+            stop_cart = sph2cart(rdecra_stop)
+
+            # the rotation for a vector vec will be:
+            # iau_RY(-radec_start[1], iau_RZ(radec_start[0], vec))
+
+            # next, find the coordinates of the stop point in the rotated system, and convert to spherical coordinates:
+            stop_sph_intermediate = cart2sph(rotation(stop_cart, radec_start, 0.0))
+
+            # we can now compute the angle between the great circle passing through the stop point
+            # and the 'intermediate' rotated system. We use one of Napier's rules
+            # for right spherical triangles for that:
+            # [see https://en.wikipedia.org/wiki/Spherical_trigonometry]
+            # angle_stop = np.arctan(np.tan(stop_sph_intermediate[1]) / np.sin(stop_sph_intermediate[2]))
+            angle_stop = np.arctan2(np.tan(stop_sph_intermediate[1]), np.sin(stop_sph_intermediate[2]))
+
+            # finally, we rotate the intermediate system around its X axis by angle_stop so that the
+            # stop point ends up on the (yet another new) XY plane
+            # print(rotation(start_cart, radec_start, angle_stop), rotation(stop_cart, radec_start, angle_stop))
+
+            # coordinates of the stop point are now (cos(theta), sin(theta), 0):
+            # theta = np.arccos(np.dot(start_cart, stop_cart))
+            # print('cos(0), sin(0)', np.array([np.cos(theta), np.sin(theta)]))
+
+            lonlat_start = rotate_radec(radec_start, radec_start, angle_stop)
+            lonlat_stop = rotate_radec(radec_stop, radec_start, angle_stop)
+
             for star in grid_stars[_guide_star_cat][mag_mask]:
-                radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0
-                # print(star)
-                print(radec_star)
-                print(radec_start, radec_stop)
-                '''
-                # Consider the line extending the segment, parameterized as v + t (w - v).
-                # We find projection of point p onto the line.
-                # It falls where t = [(p-v) . (w-v)] / |w-v|^2
-                # We clamp t from [0,1] to handle points outside the segment vw.
-                '''
-                vw = radec_stop - radec_start
-                l = np.linalg.norm(vw)
-                l2 = l ** 2
-                t = np.max([0, np.min([1, np.dot(radec_star - radec_start, vw) / l2])])
-                projection = radec_start + t * vw
+                radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0  # [rad]
+                # transform our star into the new system:
+                lonlat = rotate_radec(radec_star, radec_start, angle_stop)
 
-                distance = np.linalg.norm(radec_star - projection)
+                # distance from star to asteroid track is simply the latitude in the rotated CS
+                distance_track = np.abs(lonlat[1])
+                # distance to start of track:
+                distance_start = np.arccos(np.cos(lonlat_start[0] - lonlat[0]) * np.cos(distance_track))
+                # distance to end of track:
+                distance_stop = np.arccos(np.cos(lonlat[0] - lonlat_stop[0]) * np.cos(distance_track))
+                # print(distance_track, distance_start, distance_stop)
 
-                # not too far away?
-                if radius_rad >= distance:
+                # save star in three possible cases:
+                # 1) lon_start <= lon <= lon_stop and distance_track <= radius_rad
+                # 2) lon > lon_end and distance_end <= radius_rad
+                # 3) lon < lon_start and distance_start <= radius_rad
 
-                    window_border = np.sqrt(radius_rad ** 2 - distance ** 2)
-                    delta_t_start = np.max([0, t - window_border / l])
-                    # start (linear) RA/Dec position
-                    # window_start = radec_start + delta_t_start * vw
-                    delta_t_stop = np.min([1, t + window_border / l])
-                    # stop (linear) RA/Dec position
-                    # window_stop = radec_start + delta_t_stop * vw
-                    # print(window_start, window_stop)
-                    # delta_t_'s must be multiplied by the full streak time span to get the plausible time range:
-                    # print(delta_t_start, delta_t_stop)
+                close_enough = False
+                min_distance = -1
+                if lonlat_start[0] <= lonlat[0] <= lonlat_stop[0] and distance_track <= radius_rad:
+                    close_enough = True
+                    min_distance = distance_track
+                elif lonlat[0] > lonlat_stop[0] and distance_stop <= radius_rad:
+                    close_enough = True
+                    min_distance = distance_stop
+                elif lonlat[0] < lonlat_start[0] and distance_start <= radius_rad:
+                    close_enough = True
+                    min_distance = distance_start
+
+                if close_enough:
+                    # arc length from closest point to star on star track (extension)
+                    # to furthest such that distance to it <= radius_rad:
+                    arc = np.arccos(np.cos(radius_rad) / np.cos(distance_track))
+                    # print(arc)
+                    delta_t_start = np.max([0, (lonlat[0] - arc) / lonlat_stop[0]])
+                    delta_t_stop = np.min([1, (lonlat[0] + arc) / lonlat_stop[0]])
                     t_start_star = t_start + delta_t_start * window_t_span
                     t_stop_star = t_start + delta_t_stop * window_t_span
+
+                    # print(delta_t_start, delta_t_stop)
+                    # print(t_start_star, t_stop_star)
+
                     # save:
-                    self.guide_stars.append([star, distance, [t_start_star, t_stop_star]])
+                    # name [RA, Dec] min_distance_in_arcsec [window_start_time, window_stop_time]
+                    self.guide_stars.append([star['Source'], [star['RA_ICRS'], star['DE_ICRS']], star['__Gmag_'],
+                                             min_distance*180.0/np.pi*3600, [t_start_star, t_stop_star]])
                 # else:
                 #     print('too far away')
+        print('\t number of possible guide stars: {:d}'.format(len(self.guide_stars)))
 
     @staticmethod
     def plot_field(target, window_size, radec_start, vmag_start, radec_stop, vmag_stop,
@@ -1787,4 +1863,5 @@ if __name__ == '__main__':
                        _plot_field=plot_field, _psf_fits=psf_fits)
 
     for tr in tl.targets:
-        print(tr)
+        pass
+        # print(tr)
