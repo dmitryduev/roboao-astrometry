@@ -25,12 +25,14 @@ from astropy import wcs
 from astropy.io import fits
 from astropy.time import Time
 from time import time as _time
-import multiprocessing
 import pytz
 from numba import jit
+import math
 from copy import deepcopy
 import traceback
 from astroquery.vizier import Vizier
+import multiprocessing
+# from distributed import Client, LocalCluster
 
 import matplotlib
 matplotlib.use('Qt5Agg')
@@ -38,11 +40,81 @@ matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
 import aplpy
 
+# use dask.distributed to run stuff in parallel
+
+# initialize a local 'cluster':
+# cluster = LocalCluster()
+# client = Client(cluster)
+# client = Client('127.0.0.1:8786')
 
 # initialize Vizier object
 viz = Vizier()
 viz.ROW_LIMIT = -1
 viz.TIMEOUT = 3600
+
+
+def sta_compute_position_GCRS(_sta, _eops, _mjd):
+    """
+        Get pypride station object with computed GCRS position for station-centric ra/decs
+
+    :param _mjd: full mjd
+    :return:
+    """
+    if _sta.name != 'GEOCENTR' or _eops is not None:
+        ''' set dates: '''
+        JD = _mjd + 2400000.5
+
+        ''' compute tai & tt '''
+        TAI, TT = taitime(_mjd, 0.0)
+
+        ''' interpolate eops to tstamp '''
+        UT1, eop_int = eop_iers(_mjd, 0.0, _eops)
+
+        ''' compute coordinate time fraction of CT day at 1st observing site '''
+        CT, dTAIdCT = t_eph(JD, UT1, TT, _sta.lon_gcen, _sta.u, _sta.v)
+
+        ''' BCRS state vectors of celestial bodies at JD+CT, [m, m/s]: '''
+        # ## Earth:
+        # rrd = pleph(JD + CT, 3, 12, inp['jpl_eph'])
+        # earth = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
+        # # Earth's acceleration in m/s**2:
+        # v_plus = np.array(pleph(JD + CT + 1.0 / 86400.0, 3, 12, inp['jpl_eph'])[3:])
+        # v_minus = np.array(pleph(JD + CT - 1.0 / 86400.0, 3, 12, inp['jpl_eph'])[3:])
+        # a = (v_plus - v_minus) * 1e3 / 2.0
+        # a = np.array(np.matrix(a).T)
+        # earth = np.hstack((earth, a))
+        # ## Sun:
+        # rrd = pleph(JD + CT, 11, 12, inp['jpl_eph'])
+        # sun = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
+        # ## Moon:
+        # rrd = pleph(JD + CT, 10, 12, inp['jpl_eph'])
+        # moon = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
+
+        ''' rotation matrix IERS '''
+        _date = jd_to_datetime(JD)
+        # print(_date, Time(JD, format='jd').datetime)
+        r2000 = ter2cel(_date, eop_int, dTAIdCT, 'iau2000')
+
+        ''' ignore displacements due to geophysical effects '''
+        # for ii, st in enumerate(sta):
+        #     if st.name == 'GEOCENTR' or st.name == 'RA':
+        #         continue
+        #         sta[ii] = dehanttideinel(st, _date, earth, sun, moon, r2000)
+        #         sta[ii] = hardisp(st, _date, r2000)
+        #         sta[ii] = poletide(st, _date, eop_int, r2000)
+
+        ''' add up geophysical corrections and convert sta state to J2000 '''
+        _sta.j2000gp(r2000)
+
+    return _sta
+
+
+def target_guide_star_helper(_args):
+    target, _jpl_eph, _guide_star_cat, _station, _eops, _radius, _margin, _m_lim_gs, _plot_field, _model_psf = _args
+    target.set_guide_stars(_jpl_eph=_jpl_eph, _guide_star_cat=_guide_star_cat,
+                           _station=_station, _eops=_eops, _radius=_radius, _margin=_margin,
+                           _m_lim_gs=_m_lim_gs, _plot_field=_plot_field, _model_psf=_model_psf)
+    return target
 
 
 def rotation(_vec, _radec_start, _angle_stop):
@@ -185,7 +257,7 @@ def generate_image(xy, mag, xy_ast=None, mag_ast=None, exp=None, nx=2048, ny=204
     return image
 
 
-@jit
+# @jit
 def dms(rad):
     d, m = divmod(abs(rad), np.pi/180)
     m, s = divmod(m, np.pi/180/60)
@@ -196,7 +268,7 @@ def dms(rad):
         return [-d, -m, -s]
 
 
-@jit
+# @jit
 def hms(rad):
     if rad < 0:
         rad += np.pi
@@ -204,6 +276,152 @@ def hms(rad):
     m, s = divmod(m, np.pi/12/60)
     s /= np.pi/12/3600
     return [h, m, s]
+
+
+def days_to_hmsm(days):
+    """
+    Convert fractional days to hours, minutes, seconds, and microseconds.
+    Precision beyond microseconds is rounded to the nearest microsecond.
+
+    Parameters
+    ----------
+    days : float
+        A fractional number of days. Must be less than 1.
+
+    Returns
+    -------
+    hour : int
+        Hour number.
+
+    min : int
+        Minute number.
+
+    sec : int
+        Second number.
+
+    micro : int
+        Microsecond number.
+
+    Raises
+    ------
+    ValueError
+        If `days` is >= 1.
+
+    Examples
+    --------
+    >>> days_to_hmsm(0.1)
+    (2, 24, 0, 0)
+
+    """
+    hours = days * 24.
+    hours, hour = math.modf(hours)
+
+    mins = hours * 60.
+    mins, min = math.modf(mins)
+
+    secs = mins * 60.
+    secs, sec = math.modf(secs)
+
+    micro = round(secs * 1.e6)
+
+    return int(hour), int(min), int(sec), int(micro)
+
+
+def jd_to_date(jd):
+    """
+    Convert Julian Day to date.
+
+    Algorithm from 'Practical Astronomy with your Calculator or Spreadsheet',
+        4th ed., Duffet-Smith and Zwart, 2011.
+
+    Parameters
+    ----------
+    jd : float
+        Julian Day
+
+    Returns
+    -------
+    year : int
+        Year as integer. Years preceding 1 A.D. should be 0 or negative.
+        The year before 1 A.D. is 0, 10 B.C. is year -9.
+
+    month : int
+        Month as integer, Jan = 1, Feb. = 2, etc.
+
+    day : float
+        Day, may contain fractional part.
+
+    Examples
+    --------
+    Convert Julian Day 2446113.75 to year, month, and day.
+
+    >>> jd_to_date(2446113.75)
+    (1985, 2, 17.25)
+
+    """
+    jd += 0.5
+
+    F, I = math.modf(jd)
+    I = int(I)
+
+    A = math.trunc((I - 1867216.25) / 36524.25)
+
+    if I > 2299160:
+        B = I + 1 + A - math.trunc(A / 4.)
+    else:
+        B = I
+
+    C = B + 1524
+
+    D = math.trunc((C - 122.1) / 365.25)
+
+    E = math.trunc(365.25 * D)
+
+    G = math.trunc((C - E) / 30.6001)
+
+    day = C - E + F - math.trunc(30.6001 * G)
+
+    if G < 13.5:
+        month = G - 1
+    else:
+        month = G - 13
+
+    if month > 2.5:
+        year = D - 4716
+    else:
+        year = D - 4715
+
+    return year, month, day
+
+
+def jd_to_datetime(jd):
+    """
+    Convert a Julian Day to an `jdutil.datetime` object.
+
+    Parameters
+    ----------
+    jd : float
+        Julian day.
+
+    Returns
+    -------
+    dt : `jdutil.datetime` object
+        `jdutil.datetime` equivalent of Julian day.
+
+    Examples
+    --------
+    >>> jd_to_datetime(2446113.75)
+    datetime(1985, 2, 17, 6, 0)
+
+    """
+    year, month, day = jd_to_date(jd)
+
+    frac_days, day = math.modf(day)
+    day = int(day)
+
+    hour, min, sec, micro = days_to_hmsm(frac_days)
+
+    return datetime.datetime(year, month, day, hour, min, sec, micro)
 
 
 def _target_is_vector(target):
@@ -306,67 +524,6 @@ def load_sta_eop(_inp, _date, station_name='KP-VLBA'):
     return sta, eops
 
 
-def sta_compute_position(sta, eops, _date):
-    """
-        Get pypride station object with precomputed GCRS position for station-centric ra/decs
-    :param _inp:
-    :param _date: datetime object. needed to load eops?
-    :param station_name:
-    :return:
-    """
-
-    ''' set dates: '''
-    mjd = mjuliandate(_date.year, _date.month, _date.day)
-    # dd = mjd - mjd_start
-    UTC = (_date.hour + _date.minute / 60.0 + _date.second / 3600.0) / 24.0
-    JD = mjd + 2400000.5
-
-    ''' compute tai & tt '''
-    TAI, TT = taitime(mjd, UTC)
-
-    ''' interpolate eops to tstamp '''
-    UT1, eop_int = eop_iers(mjd, UTC, eops)
-
-    ''' compute coordinate time fraction of CT day at 1st observing site '''
-    CT, dTAIdCT = t_eph(JD, UT1, TT, sta[0].lon_gcen, sta[0].u, sta[0].v)
-
-    ''' BCRS state vectors of celestial bodies at JD+CT, [m, m/s]: '''
-    # ## Earth:
-    # rrd = pleph(JD + CT, 3, 12, inp['jpl_eph'])
-    # earth = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
-    # # Earth's acceleration in m/s**2:
-    # v_plus = np.array(pleph(JD + CT + 1.0 / 86400.0, 3, 12, inp['jpl_eph'])[3:])
-    # v_minus = np.array(pleph(JD + CT - 1.0 / 86400.0, 3, 12, inp['jpl_eph'])[3:])
-    # a = (v_plus - v_minus) * 1e3 / 2.0
-    # a = np.array(np.matrix(a).T)
-    # earth = np.hstack((earth, a))
-    # ## Sun:
-    # rrd = pleph(JD + CT, 11, 12, inp['jpl_eph'])
-    # sun = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
-    # ## Moon:
-    # rrd = pleph(JD + CT, 10, 12, inp['jpl_eph'])
-    # moon = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
-
-    ''' rotation matrix IERS '''
-    r2000 = ter2cel(_date, eop_int, dTAIdCT, 'iau2000')
-
-    ''' ignore displacements due to geophysical effects '''
-    for ii, st in enumerate(sta):
-        if st.name == 'GEOCENTR' or st.name == 'RA':
-            continue
-        # sta[ii] = dehanttideinel(st, _date, earth, sun, moon, r2000)
-        # sta[ii] = hardisp(st, _date, r2000)
-        # sta[ii] = poletide(st, _date, eop_int, r2000)
-
-    ''' add up geophysical corrections and convert sta state to J2000 '''
-    for ii, st in enumerate(sta):
-        if st.name == 'GEOCENTR' or st.name == 'RA':
-            continue
-        sta[ii].j2000gp(r2000)
-
-    return sta[0]
-
-
 class Target(object):
     """
         Store data for a single object at epoch
@@ -444,7 +601,7 @@ class Target(object):
     def set_t_el(self, _t_el):
         self.t_el = _t_el
 
-    def set_observability_windows(self, _elv_lim=45.0):
+    def set_observability_windows(self, _obs, _elv_lim=45.0):
 
         # get elv vs time:
         t_el = np.array(self.t_el)
@@ -459,12 +616,17 @@ class Target(object):
         t_dense = np.linspace(0, 1, N_dense)
         dense = np.polyval(p, t_dense)
 
+        t_0 = Time(t_el[0, 0], format='iso')
+        t_e = Time(t_el[-1, 0], format='iso')
+        dt = t_e - t_0
+
         scans = []
         scan = []
         # print(self.elv_lim)
         for t_d, el in zip(t_dense, dense):
             # print(t_d, el)
-            if el >= _elv_lim:
+            # above elevation cut-off and the Sun is down?
+            if el >= _elv_lim and _obs.is_night(t_0 + t_d * dt):
                 scan.append(t_d)
                 # print('appended ', t_d, ' for ', el)
             else:
@@ -478,20 +640,17 @@ class Target(object):
             scans.append([scan[0], scan[-1]])
         # convert to Time objects:
         if len(scans) > 0:
-            t_0 = Time(t_el[0, 0], format='iso')
-            t_e = Time(t_el[-1, 0], format='iso')
-            dt = t_e - t_0
             scans = t_0 + scans * dt
+            self.observability_windows = scans
 
-        self.observability_windows = scans
-
-    def set_guide_stars(self, _jpl_eph, _guide_star_cat=u'I/337/gaia', _station=None,
+    def set_guide_stars(self, _jpl_eph, _guide_star_cat=u'I/337/gaia', _station=None, _eops=None,
                         _radius=30.0, _margin=30.0, _m_lim_gs=16.0, _plot_field=False,
                         _model_psf=None):
         """
             Get guide stars within radius arcseconds for each observability window.
         :param _jpl_eph:
         :param _station:
+        :param _eops:
         :param _radius: maximum distance to guide star in arcseconds
         :param _margin: padd window with margin arcsec (one-sided margin)
         :return:
@@ -514,20 +673,43 @@ class Target(object):
             # start of the 'arc'
             t_start = window[0]
             radec_start, _, vmag_start = self.object.raDecVmag(t_start.mjd, _jpl_eph, epoch='J2000',
-                                                               station=_station, output_Vmag=True)
+                                                               station=sta_compute_position_GCRS(_station, _eops,
+                                                                                                 t_start.mjd),
+                                                               output_Vmag=True)
             radec_start = np.array(radec_start)
+            radec_start_sc = SkyCoord(ra=radec_start[0], dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs')
             # end of the 'arc'
             t_stop = window[1]
             radec_stop, _, vmag_stop = self.object.raDecVmag(t_stop.mjd, _jpl_eph, epoch='J2000',
-                                                             station=_station, output_Vmag=True)
+                                                             station=sta_compute_position_GCRS(_station, _eops,
+                                                                                               t_stop.mjd),
+                                                             output_Vmag=True)
             radec_stop = np.array(radec_stop)
+            radec_stop_sc = SkyCoord(ra=radec_stop[0], dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
+
+            print('arc length: ', radec_stop_sc.separation(radec_start_sc))
+
+            # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
+            rdecra_start = np.hstack([1.0, radec_start[::-1]])
+            rdecra_stop = np.hstack([1.0, radec_stop[::-1]])
+            start_cart = sph2cart(rdecra_start)
+            stop_cart = sph2cart(rdecra_stop)
+
             # middle point for the 'FoV':
-            radec_middle = (radec_start + radec_stop) / 2.0
+            lamb = 1 + np.dot(start_cart, stop_cart) / 1.0 ** 2
+            middle_cart = (start_cart + stop_cart) / np.sqrt(2.0 * lamb)
+            rdecra_middle = cart2sph(middle_cart)
+            radec_middle = rdecra_middle[:-3:-1]
+
             # 'FoV' size + margins at both sides:
-            window_size = np.abs(radec_stop - radec_start) + 2.0*np.array([_margin*np.pi/180.0/3600,
-                                                                           _margin*np.pi/180.0/3600])
+            ra_size = SkyCoord(ra=radec_start[0], dec=0, unit=(u.rad, u.rad), frame='icrs').\
+                separation(SkyCoord(ra=radec_stop[0], dec=0, unit=(u.rad, u.rad), frame='icrs')).rad
+            dec_size = SkyCoord(ra=0, dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs'). \
+                separation(SkyCoord(ra=0, dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')).rad
+            window_size = np.array([ra_size, dec_size]) + 2.0*np.array([_margin*np.pi/180.0/3600,
+                                                                        _margin*np.pi/180.0/3600])
             # in arcsec:
-            # print(window_size*180.0/np.pi*3600)
+            print('window_size in \":', window_size*180.0/np.pi*3600)
 
             # window time span
             window_t_span = t_stop - t_start
@@ -537,7 +719,10 @@ class Target(object):
             # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
             grid_stars = viz.query_region(target, width=window_size[0]*u.rad, height=window_size[1]*u.rad,
                                           catalog=_guide_star_cat)
-            # print(guide_stars[_guide_star_cat])
+            if len(list(grid_stars.keys())) == 0:
+                # no stars found? proceed to next window
+                continue
+
             # guide star magnitudes:
             grid_star_mags = np.array(grid_stars[_guide_star_cat]['__Gmag_'])
             # those that are bright enough for tip-tilt:
@@ -555,12 +740,6 @@ class Target(object):
             # we first rotate the (Cartesian) coordinate system so that the start point of the segment radec_start
             # (position of asteroid at the beginning of the window) has the coordinates (1,0,0) in
             # the new system. To do that, first rotate around Z by RA (of radec_start) and then around Y by -Dec
-
-            # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
-            rdecra_start = np.hstack([1.0, radec_start[::-1]])
-            rdecra_stop = np.hstack([1.0, radec_stop[::-1]])
-            start_cart = sph2cart(rdecra_start)
-            stop_cart = sph2cart(rdecra_stop)
 
             # the rotation for a vector vec will be:
             # iau_RY(-radec_start[1], iau_RZ(radec_start[0], vec))
@@ -591,6 +770,10 @@ class Target(object):
                 # transform our star into the new system:
                 lonlat = rotate_radec(radec_star, radec_start, angle_stop)
 
+                # astropy distances:
+                star_sc = SkyCoord(ra=radec_star[0], dec=radec_star[1], unit=(u.rad, u.rad), frame='icrs')
+                # print(star['Source'], star_sc.separation(radec_start_sc), star_sc.separation(radec_stop_sc))
+
                 # distance from star to asteroid track is simply the latitude in the rotated CS
                 distance_track = np.abs(lonlat[1])
                 # distance to start of track:
@@ -617,6 +800,7 @@ class Target(object):
                     min_distance = distance_start
 
                 if close_enough:
+                    print(self.object.name, star['Source'], 'is close enough!')
                     # arc length from closest point to star on star track (extension)
                     # to furthest such that distance to it <= radius_rad:
                     arc = np.arccos(np.cos(radius_rad) / np.cos(distance_track))
@@ -633,6 +817,64 @@ class Target(object):
                     # name [RA, Dec] min_distance_in_arcsec [window_start_time, window_stop_time]
                     self.guide_stars.append([star['Source'], [star['RA_ICRS'], star['DE_ICRS']], star['__Gmag_'],
                                              min_distance*180.0/np.pi*3600, [t_start_star, t_stop_star]])
+
+                    # if _plot_field:
+                    if True:
+                        radec_start, _, vmag_start = self.object.raDecVmag(t_start_star.mjd, _jpl_eph, epoch='J2000',
+                                                                           station=sta_compute_position_GCRS(_station,
+                                                                                                             _eops,
+                                                                                                     t_start_star.mjd),
+                                                                           output_Vmag=True)
+                        radec_start = np.array(radec_start)
+                        # end of the 'arc'
+                        radec_stop, _, vmag_stop = self.object.raDecVmag(t_stop_star.mjd, _jpl_eph, epoch='J2000',
+                                                                         station=sta_compute_position_GCRS(_station,
+                                                                                                           _eops,
+                                                                                                       t_stop_star.mjd),
+                                                                         output_Vmag=True)
+                        radec_stop = np.array(radec_stop)
+
+                        # want to center on the track instead?
+                        # # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
+                        # rdecra_start = np.hstack([1.0, radec_start[::-1]])
+                        # rdecra_stop = np.hstack([1.0, radec_stop[::-1]])
+                        # start_cart = sph2cart(rdecra_start)
+                        # stop_cart = sph2cart(rdecra_stop)
+                        #
+                        # # middle point for the 'FoV':
+                        # lamb = 1 + np.dot(start_cart, stop_cart) / 1.0 ** 2
+                        # middle_cart = (start_cart + stop_cart) / np.sqrt(2.0 * lamb)
+                        # rdecra_middle = cart2sph(middle_cart)
+                        # radec_middle = rdecra_middle[:-3:-1]
+
+                        # 'FoV' + margins:
+                        ra_size = SkyCoord(ra=radec_start[0], dec=0, unit=(u.rad, u.rad), frame='icrs'). \
+                            separation(SkyCoord(ra=radec_stop[0], dec=0, unit=(u.rad, u.rad), frame='icrs')).rad
+                        dec_size = SkyCoord(ra=0, dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs'). \
+                            separation(SkyCoord(ra=0, dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')).rad
+                        window_size = np.array([ra_size, dec_size]) + 2.0 * np.array([_margin * np.pi / 180.0 / 3600,
+                                                                                      _margin * np.pi / 180.0 / 3600])
+
+                        # Robo-AO VIC FoV is 36"x36":
+                        # window_size = np.array([36 * np.pi / 180.0 / 3600, 36 * np.pi / 180.0 / 3600])
+                        # in arcsec:
+                        # print('window_size in \":', window_size * 180.0 / np.pi * 3600)
+
+                        # window time span
+                        window_t_span = t_stop_star - t_start_star
+
+                        # stars in the field (without mag cut-off):
+                        fov_stars = viz.query_region(star_sc, width=window_size[0] * u.rad,
+                                                     height=window_size[1] * u.rad,
+                                                     catalog=_guide_star_cat)
+
+                        # center plot on star:
+                        print('plotting', self.object.name, star['Source'], t_start_star, t_stop_star)
+                        self.plot_field(star_sc, window_size=window_size,
+                                        radec_start=radec_start, vmag_start=vmag_start,
+                                        radec_stop=radec_stop, vmag_stop=vmag_stop,
+                                        exposure=window_t_span,
+                                        _model_psf=_model_psf, grid_stars=fov_stars[_guide_star_cat])
                 # else:
                 #     print('too far away')
         print('\t number of possible guide stars: {:d}'.format(len(self.guide_stars)))
@@ -695,6 +937,8 @@ class Target(object):
 
         asteroid_start = coord.SkyCoord(ra=radec_start[0], dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs')
         asteroid_stop = coord.SkyCoord(ra=radec_stop[0], dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
+
+        # TODO: check if start or stop are outside FoV, correct if necessary
 
         pix_asteroid = np.array([w.wcs_world2pix(asteroid_start.ra.deg, asteroid_start.dec.deg, 0),
                                  w.wcs_world2pix(asteroid_stop.ra.deg, asteroid_stop.dec.deg, 0)])
@@ -791,11 +1035,13 @@ class TargetListAsteroids(object):
         # load pypride stuff
         if _observatory == 'kpno':
             _sta, self.eops = load_sta_eop(_inp=self.inp, _date=date, station_name='KP-VLBA')
+            self.sta = _sta[0]
         else:
             print('Station is not Kitt Peak! Falling back to geocentric ra/decs')
             _sta, self.eops = load_sta_eop(_inp=self.inp, _date=date, station_name='GEOCENTR')
+            self.sta = _sta[0]
 
-        self.observatory_pypride = sta_compute_position(sta=_sta, eops=self.eops, _date=date)
+        # self.observatory_pypride = sta_compute_position(sta=self.sta, eops=self.eops, _date=date)
 
         ''' precalc vw matrix '''
         lat = self.observatory.location.latitude.rad
@@ -1111,7 +1357,8 @@ class TargetListAsteroids(object):
 
         # jpl_eph - path to eph used by pypride
         radec, radec_dot, Vmag = asteroid.raDecVmag(mjd, self.inp['jpl_eph'], epoch='J2000',
-                                                    station=self.observatory_pypride, output_Vmag=True)
+                                                    station=sta_compute_position_GCRS(self.sta, self.eops, _mjd=mjd),
+                                                    output_Vmag=True)
         #    print(radec.ra.hms, radec.dec.dms, radec_dot, Vmag)
 
         return radec, radec_dot, Vmag
@@ -1147,10 +1394,11 @@ class TargetListAsteroids(object):
 
         # print(self.targets)
         for target in self.targets:
-            target.set_observability_windows(_elv_lim=self.elv_lim)
+            if target.is_observable:
+                target.set_observability_windows(_obs=self.observatory, _elv_lim=self.elv_lim)
 
     def get_guide_stars(self, _guide_star_cat=u'I/337/gaia', _radius=30.0, _margin=30.0, _m_lim_gs=16.0,
-                        _plot_field=False, _psf_fits=None):
+                        _plot_field=False, _psf_fits=None, parallel=False):
         """
             Get astrometric guide stars for each observing window
         :return:
@@ -1169,10 +1417,20 @@ class TargetListAsteroids(object):
         else:
             model_psf = None
 
-        for target in self.targets:
-            target.set_guide_stars(_jpl_eph=self.inp['jpl_eph'], _guide_star_cat=_guide_star_cat,
-                                   _station=self.observatory_pypride, _radius=_radius, _margin=_margin,
-                                   _m_lim_gs=_m_lim_gs, _plot_field=_plot_field, _model_psf=model_psf)
+        if parallel:
+            # FIXME: can't pickle fortran object error :(
+            # targ_args = [self.inp['jpl_eph'], _guide_star_cat, self.observatory_pypride,
+            #              _radius, _margin, _m_lim_gs, _plot_field, model_psf]
+            # args = [[target] + targ_args for target in self.targets]
+            # futures = client.map(target_guide_star_helper, args)
+            # self.targets = client.gather(futures)
+            pass
+        else:
+            for target in self.targets:
+                if target.is_observable:
+                    target.set_guide_stars(_jpl_eph=self.inp['jpl_eph'], _guide_star_cat=_guide_star_cat,
+                                           _station=self.sta, _eops=self.eops, _radius=_radius, _margin=_margin,
+                                           _m_lim_gs=_m_lim_gs, _plot_field=_plot_field, _model_psf=model_psf)
 
 
 class AsteroidDatabase(object):
@@ -1652,6 +1910,7 @@ class Asteroid(object):
 
         return r2000
 
+    # for some reason, jit-compilation of this one slows down the execution significantly!
     # @jit
     def raDecVmag(self, mjd, jpl_eph, epoch='J2000', station=None, output_Vmag=False):
         """ Calculate ra/dec's from equatorial state
@@ -1847,8 +2106,11 @@ if __name__ == '__main__':
     ''' Target list '''
     # date in UTC!!! (for KP, it's the next day if it's still daytime)
     now = datetime.datetime.now(pytz.timezone(timezone))
-    today = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=1)
+    # today = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=1)
+    today = datetime.datetime(now.year, now.month, now.day) - datetime.timedelta(days=10)
+    print('running computation for:', today)
 
+    # NEA or PHA:
     tl = TargetListAsteroids(f_inp, database_source='mpc', database_file='PHA.txt',
                              _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, date=today)
     # get all bright targets given m_lim
@@ -1860,8 +2122,10 @@ if __name__ == '__main__':
     tl.get_observing_windows()
     # get guide stars
     tl.get_guide_stars(_guide_star_cat=guide_star_cat, _radius=radius, _margin=margin, _m_lim_gs=m_lim_gs,
-                       _plot_field=plot_field, _psf_fits=psf_fits)
+                       _plot_field=plot_field, _psf_fits=psf_fits, parallel=False)
 
     for tr in tl.targets:
-        pass
-        # print(tr)
+        # pass
+        print(tr)
+
+    # client.shutdown()
