@@ -4,7 +4,9 @@ import os
 import datetime
 import urllib2
 import ConfigParser
+import json
 import inspect
+from collections import OrderedDict
 from pypride.vintflib import pleph
 from pypride.classes import inp_set, constants
 from pypride.vintlib import eop_update, internet_on, load_cats, mjuliandate, taitime, eop_iers, t_eph, ter2cel
@@ -566,6 +568,28 @@ class Target(object):
             out_str += '\n guide stars: {:s}'.format(np.array(self.guide_stars))
         return out_str + '>>'
 
+    def to_dict(self):
+        out_dict = OrderedDict([['name', self.object.name],
+                                ['magnitude', self.mag],
+                                ['mean_epoch', self.epoch.datetime.strftime('%Y%m%d_%H%M%S.%f')],
+                                ['mean_radec', self.radec],
+                                ['mean_radec_dot', self.radec_dot],
+                                ['meridian_crossing', str(self.meridian_crossing).lower()],
+                                ['is_observable', str(self.is_observable).lower()],
+                                ['guide_stars', []]
+                               ])
+        if self.guide_stars is not None:
+            for star in self.guide_stars[::-1]:
+                out_dict['guide_stars'].append(OrderedDict([['id', star[0]],
+                                                            ['radec', star[1]],
+                                                            ['magnitude', float(star[2])],
+                                                            ['min_separation', float(star[3])],
+                                                            ['obs_window',
+                                                             [star[4][0].datetime.strftime('%Y%m%d_%H%M%S.%f'),
+                                                              star[4][1].datetime.strftime('%Y%m%d_%H%M%S.%f')]]
+                                                            ]))
+        return '_'.join(out_dict['name'].split(' ')), out_dict
+
     def set_epoch(self, _epoch):
         """
             Position at the middle of the night
@@ -645,7 +669,8 @@ class Target(object):
 
     def set_guide_stars(self, _jpl_eph, _guide_star_cat=u'I/337/gaia', _station=None, _eops=None,
                         _radius=30.0, _margin=30.0, _m_lim_gs=16.0, _plot_field=False,
-                        _model_psf=None):
+                        _model_psf=None, _display_plot=False, _save_plot=False,
+                        _path_nightly_date='./'):
         """
             Get guide stars within radius arcseconds for each observability window.
         :param _jpl_eph:
@@ -728,12 +753,12 @@ class Target(object):
             # those that are bright enough for tip-tilt:
             mag_mask = grid_star_mags <= _m_lim_gs
 
-            if _plot_field:
-                self.plot_field(target, window_size=window_size,
-                                radec_start=radec_start, vmag_start=vmag_start,
-                                radec_stop=radec_stop, vmag_stop=vmag_stop,
-                                exposure=t_stop-t_start,
-                                _model_psf=_model_psf, grid_stars=grid_stars[_guide_star_cat])
+            # if _plot_field:
+            #     self.plot_field(target, window_size=window_size,
+            #                     radec_start=radec_start, vmag_start=vmag_start,
+            #                     radec_stop=radec_stop, vmag_stop=vmag_stop,
+            #                     exposure=t_stop-t_start,
+            #                     _model_psf=_model_psf, grid_stars=grid_stars[_guide_star_cat])
 
             ''' compute distances from stars, return those (bright ones) that can be used as guide stars '''
             # to compute distance from a star to a great circle segment,
@@ -800,7 +825,7 @@ class Target(object):
                     min_distance = distance_start
 
                 if close_enough:
-                    print(self.object.name, star['Source'], 'is close enough!')
+                    # print('{:s}:'.format(self.object.name), star['Source'], 'is close enough!')
                     # arc length from closest point to star on star track (extension)
                     # to furthest such that distance to it <= radius_rad:
                     arc = np.arccos(np.cos(radius_rad) / np.cos(distance_track))
@@ -818,70 +843,77 @@ class Target(object):
                     self.guide_stars.append([star['Source'], [star['RA_ICRS'], star['DE_ICRS']], star['__Gmag_'],
                                              min_distance*180.0/np.pi*3600, [t_start_star, t_stop_star]])
 
-                    # if _plot_field:
-                    if True:
-                        radec_start, _, vmag_start = self.object.raDecVmag(t_start_star.mjd, _jpl_eph, epoch='J2000',
+                    if _plot_field:
+                    # if True:
+                        radec_start_star, _, vmag_start_star = self.object.raDecVmag(t_start_star.mjd, _jpl_eph,
+                                                                                     epoch='J2000',
                                                                            station=sta_compute_position_GCRS(_station,
                                                                                                              _eops,
                                                                                                      t_start_star.mjd),
                                                                            output_Vmag=True)
-                        radec_start = np.array(radec_start)
+                        radec_start_star = np.array(radec_start_star)
                         # end of the 'arc'
-                        radec_stop, _, vmag_stop = self.object.raDecVmag(t_stop_star.mjd, _jpl_eph, epoch='J2000',
+                        radec_stop_star, _, vmag_stop_star = self.object.raDecVmag(t_stop_star.mjd, _jpl_eph,
+                                                                                   epoch='J2000',
                                                                          station=sta_compute_position_GCRS(_station,
                                                                                                            _eops,
                                                                                                        t_stop_star.mjd),
                                                                          output_Vmag=True)
-                        radec_stop = np.array(radec_stop)
+                        radec_stop_star = np.array(radec_stop_star)
 
                         # want to center on the track instead?
                         # # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
-                        # rdecra_start = np.hstack([1.0, radec_start[::-1]])
-                        # rdecra_stop = np.hstack([1.0, radec_stop[::-1]])
-                        # start_cart = sph2cart(rdecra_start)
-                        # stop_cart = sph2cart(rdecra_stop)
+                        # rdecra_start_star = np.hstack([1.0, radec_start_star[::-1]])
+                        # rdecra_stop_star = np.hstack([1.0, radec_stop_star[::-1]])
+                        # start_cart_star = sph2cart(rdecra_start_star)
+                        # stop_cart_star = sph2cart(rdecra_stop_star)
                         #
                         # # middle point for the 'FoV':
-                        # lamb = 1 + np.dot(start_cart, stop_cart) / 1.0 ** 2
-                        # middle_cart = (start_cart + stop_cart) / np.sqrt(2.0 * lamb)
-                        # rdecra_middle = cart2sph(middle_cart)
-                        # radec_middle = rdecra_middle[:-3:-1]
+                        # lamb = 1 + np.dot(start_cart_star, stop_cart_star) / 1.0 ** 2
+                        # middle_cart_star = (start_cart_star + stop_cart_star) / np.sqrt(2.0 * lamb)
+                        # rdecra_middle_star = cart2sph(middle_cart_star)
+                        # radec_middle_star = rdecra_middle_star[:-3:-1]
 
                         # 'FoV' + margins:
-                        ra_size = SkyCoord(ra=radec_start[0], dec=0, unit=(u.rad, u.rad), frame='icrs'). \
-                            separation(SkyCoord(ra=radec_stop[0], dec=0, unit=(u.rad, u.rad), frame='icrs')).rad
-                        dec_size = SkyCoord(ra=0, dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs'). \
-                            separation(SkyCoord(ra=0, dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')).rad
-                        window_size = np.array([ra_size, dec_size]) + 2.0 * np.array([_margin * np.pi / 180.0 / 3600,
-                                                                                      _margin * np.pi / 180.0 / 3600])
+                        ra_size_star = SkyCoord(ra=radec_start_star[0], dec=0, unit=(u.rad, u.rad), frame='icrs'). \
+                            separation(SkyCoord(ra=radec_stop_star[0], dec=0, unit=(u.rad, u.rad), frame='icrs')).rad
+                        dec_size_star = SkyCoord(ra=0, dec=radec_start_star[1], unit=(u.rad, u.rad), frame='icrs'). \
+                            separation(SkyCoord(ra=0, dec=radec_stop_star[1], unit=(u.rad, u.rad), frame='icrs')).rad
+                        window_size_star = np.array([ra_size_star, dec_size_star]) \
+                            + 2.0 * np.array([_margin * np.pi / 180.0 / 3600, _margin * np.pi / 180.0 / 3600])
 
                         # Robo-AO VIC FoV is 36"x36":
-                        # window_size = np.array([36 * np.pi / 180.0 / 3600, 36 * np.pi / 180.0 / 3600])
+                        # window_size_star = np.array([36 * np.pi / 180.0 / 3600, 36 * np.pi / 180.0 / 3600])
                         # in arcsec:
-                        # print('window_size in \":', window_size * 180.0 / np.pi * 3600)
+                        # print('window_size in \":', window_size_star * 180.0 / np.pi * 3600)
 
                         # window time span
-                        window_t_span = t_stop_star - t_start_star
+                        window_t_span_star = t_stop_star - t_start_star
 
                         # stars in the field (without mag cut-off):
-                        fov_stars = viz.query_region(star_sc, width=window_size[0] * u.rad,
-                                                     height=window_size[1] * u.rad,
+                        fov_stars = viz.query_region(star_sc, width=window_size_star[0] * u.rad,
+                                                     height=window_size_star[1] * u.rad,
                                                      catalog=_guide_star_cat)
 
                         # center plot on star:
                         print('plotting', self.object.name, star['Source'], t_start_star, t_stop_star)
-                        self.plot_field(star_sc, window_size=window_size,
-                                        radec_start=radec_start, vmag_start=vmag_start,
-                                        radec_stop=radec_stop, vmag_stop=vmag_stop,
-                                        exposure=window_t_span,
-                                        _model_psf=_model_psf, grid_stars=fov_stars[_guide_star_cat])
+                        plot_name = '_'.join(self.object.name.split(' ')) + '__' + \
+                                    '_'.join(str(star['Source']).split(' '))
+                        self.plot_field(star_sc, window_size=window_size_star,
+                                        radec_start=radec_start_star, vmag_start=vmag_start_star,
+                                        radec_stop=radec_stop_star, vmag_stop=vmag_stop_star,
+                                        exposure=window_t_span_star,
+                                        _model_psf=_model_psf, grid_stars=fov_stars[_guide_star_cat],
+                                        _display_plot=_display_plot, _save_plot=_save_plot,
+                                        path=_path_nightly_date, name=plot_name)
                 # else:
                 #     print('too far away')
         print('\t number of possible guide stars: {:d}'.format(len(self.guide_stars)))
 
     @staticmethod
     def plot_field(target, window_size, radec_start, vmag_start, radec_stop, vmag_stop,
-                   exposure, _model_psf, grid_stars):
+                   exposure, _model_psf, grid_stars, scale_bar_size=20,
+                   _display_plot=False, _save_plot=False, path='./', name='field'):
         """
 
         :return:
@@ -938,12 +970,12 @@ class Target(object):
         asteroid_start = coord.SkyCoord(ra=radec_start[0], dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs')
         asteroid_stop = coord.SkyCoord(ra=radec_stop[0], dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
 
-        # TODO: check if start or stop are outside FoV, correct if necessary
+        # check if start or stop are outside FoV, correct if necessary? no, just plot the full window
 
         pix_asteroid = np.array([w.wcs_world2pix(asteroid_start.ra.deg, asteroid_start.dec.deg, 0),
                                  w.wcs_world2pix(asteroid_stop.ra.deg, asteroid_stop.dec.deg, 0)])
         mag_asteroid = np.mean([vmag_start, vmag_stop])
-        # print(pix_asteroid)
+        # print(pix_asteroid, pix_asteroid.shape)
         # print(mag_asteroid)
 
         sim_image = generate_image(xy=pix_stars, mag=mag_stars,
@@ -978,12 +1010,36 @@ class Target(object):
         # add asteroid 'from'->'to'
         fig.show_markers(asteroid_start.ra.deg, asteroid_start.dec.deg,
                          layer='marker_set_1', edgecolor=plt.cm.Blues(0.2),
-                         facecolor=plt.cm.Blues(0.3), marker='o', s=50, alpha=0.7)
+                         facecolor=plt.cm.Blues(0.3), marker='o', s=50, alpha=0.7, linewidths=3)
         fig.show_markers(asteroid_stop.ra.deg, asteroid_stop.dec.deg,
                          layer='marker_set_2', edgecolor=plt.cm.Oranges(0.5),
-                         facecolor=plt.cm.Oranges(0.3), marker='x', s=50, alpha=0.7)
+                         facecolor=plt.cm.Oranges(0.3), marker='x', s=50, alpha=0.7, linewidths=3)
 
-        plt.show()
+        # fig.show_arrows([asteroid_start.ra.rad*u.rad], [asteroid_start.dec.rad*u.rad],
+        #                 [np.sign(pix_asteroid[1, 0] - pix_asteroid[0, 0]) *
+        #                 coord.SkyCoord(ra=radec_start[0], dec=0, unit=(u.rad, u.rad), frame='icrs').
+        #                  separation(coord.SkyCoord(ra=radec_stop[0], dec=0, unit=(u.rad, u.rad), frame='icrs'))],
+        #                 [np.sign(pix_asteroid[1, 1] - pix_asteroid[0, 1]) *
+        #                 coord.SkyCoord(ra=0, dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs').
+        #                  separation(coord.SkyCoord(ra=0, dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs'))],
+        #                 edgecolor=plt.cm.Oranges(0.5), facecolor=plt.cm.Oranges(0.3))
+
+        # add scale bar
+        fig.add_scalebar(length=scale_bar_size * u.arcsecond)
+        fig.scalebar.set_alpha(0.7)
+        fig.scalebar.set_color('white')
+        fig.scalebar.set_label('{:d}\"'.format(scale_bar_size))
+
+        # remove frame
+        fig.frame.set_linewidth(0)
+
+        if _save_plot:
+            if not os.path.exists(path):
+                os.makedirs(path)
+            fig.save(os.path.join(path, '{:s}.png'.format(name)))
+
+        if _display_plot:
+            plt.show()
 
 
 class TargetListAsteroids(object):
@@ -992,7 +1048,7 @@ class TargetListAsteroids(object):
     """
 
     def __init__(self, _f_inp, database_source='mpc', database_file=None, _observatory='kitt peak',
-                 _m_lim=16.0, _elv_lim=40.0, date=None, timezone='America/Phoenix'):
+                 _m_lim=16.0, _elv_lim=40.0, _date=None, timezone='America/Phoenix'):
         # init database
         if database_source == 'mpc':
             if database_file is None:
@@ -1028,20 +1084,22 @@ class TargetListAsteroids(object):
             eop_update(self.inp['cat_eop'], 3)
 
         ''' load eops '''
-        if date is None:
-            now = datetime.datetime.now(pytz.timezone(timezone))
-            date = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=1)
+        if _date is None:
+            _now = datetime.datetime.now(pytz.timezone(timezone))
+            _date = datetime.datetime(_now.year, _now.month, _now.day) + datetime.timedelta(days=1)
+
+        self.date = _date
 
         # load pypride stuff
         if _observatory == 'kpno':
-            _sta, self.eops = load_sta_eop(_inp=self.inp, _date=date, station_name='KP-VLBA')
+            _sta, self.eops = load_sta_eop(_inp=self.inp, _date=_date, station_name='KP-VLBA')
             self.sta = _sta[0]
         else:
             print('Station is not Kitt Peak! Falling back to geocentric ra/decs')
-            _sta, self.eops = load_sta_eop(_inp=self.inp, _date=date, station_name='GEOCENTR')
+            _sta, self.eops = load_sta_eop(_inp=self.inp, _date=_date, station_name='GEOCENTR')
             self.sta = _sta[0]
 
-        # self.observatory_pypride = sta_compute_position(sta=self.sta, eops=self.eops, _date=date)
+        # self.observatory_pypride = sta_compute_position(sta=self.sta, eops=self.eops, _date=_date)
 
         ''' precalc vw matrix '''
         lat = self.observatory.location.latitude.rad
@@ -1319,7 +1377,7 @@ class TargetListAsteroids(object):
 
         # proceed with observable (for more than 5% of the night) targets only
         mask_observable = table['fraction of time observable'] > fraction
-        print(mask_observable)
+        # print(mask_observable)
 
         target_list_observeable = self.targets[mask_observable]
         print('total bright asteroids: ', len(self.targets),
@@ -1398,7 +1456,8 @@ class TargetListAsteroids(object):
                 target.set_observability_windows(_obs=self.observatory, _elv_lim=self.elv_lim)
 
     def get_guide_stars(self, _guide_star_cat=u'I/337/gaia', _radius=30.0, _margin=30.0, _m_lim_gs=16.0,
-                        _plot_field=False, _psf_fits=None, parallel=False):
+                        _plot_field=False, _psf_fits=None, _display_plot=False, _save_plot=False,
+                        _path_nightly_date='./', parallel=False):
         """
             Get astrometric guide stars for each observing window
         :return:
@@ -1430,7 +1489,23 @@ class TargetListAsteroids(object):
                 if target.is_observable:
                     target.set_guide_stars(_jpl_eph=self.inp['jpl_eph'], _guide_star_cat=_guide_star_cat,
                                            _station=self.sta, _eops=self.eops, _radius=_radius, _margin=_margin,
-                                           _m_lim_gs=_m_lim_gs, _plot_field=_plot_field, _model_psf=model_psf)
+                                           _m_lim_gs=_m_lim_gs, _plot_field=_plot_field, _model_psf=model_psf,
+                                           _display_plot=_display_plot, _save_plot=_save_plot,
+                                           _path_nightly_date=_path_nightly_date)
+
+    def make_nightly_json(self, _path_nightly_date='./'):
+
+        json_dict = OrderedDict([tr.to_dict() for tr in self.targets])
+        # print(json_dict)
+
+        # for tr in self.targets:
+        #     print(tr)
+
+        # print(os.path.join(_path_nightly_date, '{:s}.json'.format('bright_objects')))
+        if not os.path.exists(_path_nightly_date):
+            os.makedirs(_path_nightly_date)
+        with open(os.path.join(_path_nightly_date, '{:s}.json'.format('bright_objects')), 'w') as fj:
+            json.dump(json_dict, fj, indent=4)  # sort_keys=True,
 
 
 class AsteroidDatabase(object):
@@ -2054,6 +2129,7 @@ if __name__ == '__main__':
     config.read(os.path.join(abs_path, 'config.ini'))
 
     f_inp = config.get('Path', 'pypride_inp')
+    path_nightly = config.get('Path', 'path_nightly')
 
     # observatory and time zone
     observatory = config.get('Observatory', 'observatory')
@@ -2076,6 +2152,8 @@ if __name__ == '__main__':
     m_lim_gs = float(config.get('Vizier', 'm_lim_gs'))
     plot_field = eval(config.get('Vizier', 'plot_field'))
     psf_fits = config.get('Vizier', 'psf_fits')
+    display_plot = eval(config.get('Vizier', 'display_plot'))
+    save_plot = eval(config.get('Vizier', 'save_plot'))
 
     run_tests = False
     if run_tests:
@@ -2107,25 +2185,27 @@ if __name__ == '__main__':
     # date in UTC!!! (for KP, it's the next day if it's still daytime)
     now = datetime.datetime.now(pytz.timezone(timezone))
     # today = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=1)
-    today = datetime.datetime(now.year, now.month, now.day) - datetime.timedelta(days=10)
-    print('running computation for:', today)
+    # date = datetime.datetime(now.year, now.month, now.day) - datetime.timedelta(days=11)
+    for dd in range(14):
+        date = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=dd)
+        print('running computation for:', date)
 
-    # NEA or PHA:
-    tl = TargetListAsteroids(f_inp, database_source='mpc', database_file='PHA.txt',
-                             _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, date=today)
-    # get all bright targets given m_lim
-    mask = None
-    tl.target_list_all(today, mask, parallel=True)
-    # get observable given elv_lim
-    tl.target_list_observable(today, twilight=twilight, fraction=fraction)
-    # get observing windows
-    tl.get_observing_windows()
-    # get guide stars
-    tl.get_guide_stars(_guide_star_cat=guide_star_cat, _radius=radius, _margin=margin, _m_lim_gs=m_lim_gs,
-                       _plot_field=plot_field, _psf_fits=psf_fits, parallel=False)
-
-    for tr in tl.targets:
-        # pass
-        print(tr)
+        # NEA or PHA:
+        tl = TargetListAsteroids(f_inp, database_source='mpc', database_file='PHA.txt',
+                                 _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, _date=date)
+        # get all bright targets given m_lim
+        mask = None
+        tl.target_list_all(date, mask, parallel=True)
+        # get observable given elv_lim
+        tl.target_list_observable(date, twilight=twilight, fraction=fraction)
+        # get observing windows
+        tl.get_observing_windows()
+        # get guide stars
+        path_nightly_date = os.path.join(path_nightly, date.strftime('%Y%m%d'))
+        tl.get_guide_stars(_guide_star_cat=guide_star_cat, _radius=radius, _margin=margin, _m_lim_gs=m_lim_gs,
+                           _plot_field=plot_field, _psf_fits=psf_fits, _display_plot=display_plot, _save_plot=save_plot,
+                           _path_nightly_date=path_nightly_date, parallel=False)
+        # save json
+        tl.make_nightly_json(_path_nightly_date=path_nightly_date)
 
     # client.shutdown()
