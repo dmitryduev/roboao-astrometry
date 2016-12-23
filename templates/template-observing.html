@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- The above 3 meta tags *must* come first in the head; any other head content must come *after* these tags -->
+    <meta name="description" content="">
+    <meta name="author" content="">
+    <!--<link rel="icon" href="favicon.ico">-->
+
+    <title>Robo-AO Planet Protection</title>
+
+    <!-- Bootstrap core CSS -->
+    <link rel="stylesheet" href="/static/css/bootstrap.min.css">
+
+    <!-- IE10 viewport hack for Surface/desktop Windows 8 bug -->
+    <link href="/static/css/ie10-viewport-bug-workaround.css" rel="stylesheet">
+
+    <!-- Custom styles for this template -->
+    <link href="/static/css/login.css" rel="stylesheet">
+
+    <!-- HTML5 shim and Respond.js for IE8 support of HTML5 elements and media queries -->
+    <!--[if lt IE 9]>
+    <script src="https://oss.maxcdn.com/html5shiv/3.7.2/html5shiv.min.js"></script>
+    <script src="https://oss.maxcdn.com/respond/1.4.2/respond.min.js"></script>
+    <![endif]-->
+
+    <style>
+        html {
+            position: relative;
+            min-height: 100%;
+        }
+        body {
+            padding-top: 70px;
+            /* Margin bottom by footer height */
+            margin-bottom: 60px;
+        }
+        .footer {
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            /* Set the fixed height of the footer here */
+            height: 60px;
+            background-color: #f5f5f5;
+        }
+        .footer > .container {
+            padding-top: 20px;
+            padding-right: 15px;
+            padding-left: 15px;
+            text-align: center;
+        }
+        th.rotate {
+            height: 70px;
+            white-space: nowrap;
+        }
+
+        th.rotate > div {
+            transform:
+                    translate(0px, -6px)
+                    rotate(315deg);
+            width: 20px;
+        }
+        th.rotate > div > span {
+            border-bottom: 1px solid #ddd;
+            padding: 5px 10px;
+        }
+        .borderless td, .borderless th {
+            border: none;
+        }
+        .table-condensed>thead>tr>th, .table-condensed>tbody>tr>th,
+        .table-condensed>tfoot>tr>th, .table-condensed>thead>tr>td,
+        .table-condensed>tbody>tr>td, .table-condensed>tfoot>tr>td {
+            padding: 1px;
+            font-size: 9px;
+        }
+        {#        .navbar-blue {#}
+        {#            background-color: #428bca !important;#}
+        {#        }#}
+        .back-to-top {
+            cursor: pointer;
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            display:none;
+        }
+    </style>
+
+</head>
+<body>
+
+<!-- Fixed navbar -->
+<nav class="navbar navbar-default navbar-fixed-top navbar-blue">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle collapsed"
+                    data-toggle="collapse" data-target="#navbar"
+                    aria-expanded="false" aria-controls="navbar">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a class="navbar-brand" href="/">Robo-AO planet protection</a>
+        </div>
+    </div>
+</nav>
+
+{# content is streamed date by date from the server #}
+{% if dates %}
+    <div class="container">
+        <div class="col-md-12">
+            <h2>
+                Bright asteroids
+            </h2>
+        </div>
+    </div>
+    {% for date, data in dates %}
+        {% if None in (date, data) %}
+            <div class="container">
+                <div class="col-md-12">
+                    <h3>No data to show</h3>
+                </div>
+            </div>
+            <br>
+        {% else %}
+            <div class="container">
+                <div class="col-md-12">
+                    <h3 style="color: #286090">{{ date[:4]+'/' + date[4:6]+'/' + date[6:] }}</h3>
+                    {% if data != None %}
+                        <table class="table table-hover table-condensed">
+                            <thead style="border-bottom: none;">
+                            <tr>
+                                {% for key in ('name', 'mag', 'mean_epoch_UTC', 'mean_RA', 'mean_Dec',
+                                               'mean_RA_dot', 'mean_Dec_dot', 'meridian_crossing',
+                                               'observable',
+                                               'guide_star_id', 'guide_star_RA', 'guide_star_Dec', 'guide_star_mag',
+                                               'guide_star_min_d', 'guide_star_obs_win', 'finding_chart',
+                                               'comment')%}
+                                    <th class="rotate"><div><span>{{ key }}</span></div></th>
+                                {% endfor %}
+                                <th></th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {% for object in data %}
+                                {% set num_gs = data[object]['guide_stars'] | length %}
+                                <tr class="clickable-row">
+                                    <td style="border-right: solid 1px #DDDDDD;"
+                                               name="object_name"
+                                            {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ object }}</td>
+                                    {% for key in ('magnitude', 'mean_epoch')%}
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                            name="{{ key }}"
+                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[object][key] }}</td>
+                                    {% endfor %}
+                                    {% for key in ('mean_radec', 'mean_radec_dot')%}
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                            name="{{ key }}"
+                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[object][key][0] }}</td>
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                            name="{{ key }}"
+                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[object][key][1] }}</td>
+                                    {% endfor %}
+                                    {% for key in ('meridian_crossing', 'is_observable')%}
+                                        {% set class = 'success' if data[object][key] == 'true' else 'danger' %}
+                                        <td style="border-right: solid 1px #DDDDDD;" name="{{ key }}"
+                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>
+                                            <span class="label label-{{ class }}">{{ data[object][key] }}</span></td>
+                                    {% endfor %}
+                                    {% if data[object]['guide_stars'] | length > 0 %}
+                                        {% set guide_star = data[object]['guide_stars'][0] %}
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                   name="gs_id">{{ guide_star['id'] }}</td>
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                            name="gs_ra">{{ guide_star['radec'][0] }}</td>
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                            name="gs_dec">{{ guide_star['radec'][1] }}</td>
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                   name="gs_id">{{ guide_star['magnitude'] }}</td>
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                   name="gs_id">{{ guide_star['min_separation'] }}</td>
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                   name="gs_id">{{ guide_star['obs_window'] }}</td>
+                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                   name="gs_id">
+                                                    <img src="data/{{ date }}/{{ guide_star['finding_chart'] }}"
+                                                     alt="{{ aux_key }}" class="img-responsive pop"
+                                                     style="cursor:pointer; cursor: hand;">
+{#                                                    <span src="data/{{ date }}/{{ guide_star['finding_chart'] }}"#}
+{#                                                       class="pop" style="cursor:pointer; cursor: hand;">#}
+{#                                                        show</span>#}
+                                        </td>
+                                    {% else %}
+                                        <td style="border-right: solid 1px #DDDDDD;" colspan="7"
+                                            name="guide_stars">
+                                            <span class="label label-danger">None</span>
+                                        </td>
+                                    {% endif %}
+                                    <td style="border-right: solid 1px #DDDDDD;"
+                                            name="comment" {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>
+                                        {{ data[object]['comment'] }}</td>
+                                </tr>
+                                    {% if data[object]['guide_stars'] | length > 1 %}
+                                        {% for guide_star in data[object]['guide_stars'][1:] %}
+                                            <tr class="clickable-row">
+                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                       name="gs_id">{{ guide_star['id'] }}</td>
+                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                    name="gs_ra">{{ guide_star['radec'][0] }}</td>
+                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                    name="gs_dec">{{ guide_star['radec'][1] }}</td>
+                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                           name="gs_id">{{ guide_star['magnitude'] }}</td>
+                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                           name="gs_id">{{ guide_star['min_separation'] }}</td>
+                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                           name="gs_id">{{ guide_star['obs_window'] }}</td>
+                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                           name="gs_id">
+                                                    <img src="data/{{ date }}/{{ guide_star['finding_chart'] }}"
+                                                     alt="{{ aux_key }}" class="img-responsive pop"
+                                                     style="cursor:pointer; cursor: hand;">
+{#                                                    <span src="data/{{ date }}/{{ guide_star['finding_chart'] }}"#}
+{#                                                       class="pop" style="cursor:pointer; cursor: hand;">#}
+{#                                                        show</span>#}
+                                                </td>
+                                            </tr>
+                                        {% endfor %}
+                                    {% endif %}
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    {% endif %}
+                </div>
+            </div>
+        {% endif %}
+    {% endfor %}
+{% endif %}
+
+
+<!-- Modal template to display aux images -->
+<div class="modal fade" id="finding_chart_modal" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal">
+                    <span aria-hidden="true">&times;</span><span class="sr-only">Close</span>
+                </button>
+                <h4 class="modal-title"></h4>
+            </div>
+            <div class="modal-body">
+                <img src="" id="finding_chart_preview" style="width: 100%;" >
+            </div>
+{#            <div class="modal-footer">#}
+{#                <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>#}
+{#            </div>#}
+        </div>
+    </div>
+</div>
+
+<!-- Scroll to top -->
+<a id="back-to-top" href="#" class="btn btn-primary btn-lg back-to-top"
+   role="button" title="Click to return on the top page"
+   data-toggle="tooltip" data-placement="left">
+    <span class="glyphicon glyphicon-chevron-up"></span>
+</a>
+
+<!-- Bootstrap core JavaScript
+================================================== -->
+<!-- Placed at the end of the document so the pages load faster -->
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js"></script>
+<script src="/static/js/bootstrap.min.js"></script>
+
+<script>
+$(document).ready(function(){
+    $(window).scroll(function () {
+        if ($(this).scrollTop() > 50) {
+            $('#back-to-top').fadeIn();
+        }
+        else {
+            $('#back-to-top').fadeOut();
+        }
+    });
+    // scroll body to 0px on click
+    $('#back-to-top').click(function () {
+        $('#back-to-top').tooltip('hide');
+        $('body,html').animate({
+            scrollTop: 0
+        }, 600);
+        return false;
+    });
+
+    $('#back-to-top').tooltip('show');
+
+});
+</script>
+
+<script>
+$(".pop").on("click", function() {
+    $('#finding_chart_preview').attr('src', $(this).attr('src'));
+    $('#finding_chart_modal').modal('show');
+});
+</script>
+
+</body>
+</html>

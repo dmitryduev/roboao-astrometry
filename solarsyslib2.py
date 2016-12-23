@@ -21,6 +21,7 @@ from astroplan import AtNightConstraint, AltitudeConstraint
 from astropy.coordinates import SkyCoord
 import astropy.coordinates as coord
 import astropy.units as u
+from astropy import table
 from scipy.ndimage import gaussian_filter
 from astropy.convolution import convolve_fft
 from astropy import wcs
@@ -36,11 +37,15 @@ from astroquery.vizier import Vizier
 import multiprocessing
 # from distributed import Client, LocalCluster
 
+import warnings
+
 import matplotlib
 matplotlib.use('Qt5Agg')
 
 import matplotlib.pyplot as plt
 import aplpy
+
+warnings.filterwarnings("ignore")
 
 # use dask.distributed to run stuff in parallel
 
@@ -146,6 +151,65 @@ def rotate_radec(_radec, _radec_start, _angle_stop):
     rdecra = np.hstack([1.0, _radec[::-1]])
     cart = sph2cart(rdecra)
     return cart2sph(rotation(cart, _radec_start, _angle_stop))[:-3:-1]
+
+
+def split_great_circle_segment(_beg, _end, _separation):
+    """
+        Iteratively split great circle segment until separation between consecutive points is <=_separation
+    :param _beg:
+    :param _end:
+    :param _separation: in arcseconds
+    :return:
+    """
+    result = []
+
+    def split_gc(_beg, _end, _separation):
+
+        # print(_beg.separation(_end))
+        if _beg.separation(_end).deg >= _separation / 3600.0:
+            _middle, _ = great_circle_segment_midpoint(_beg, _end)
+            # left half
+            split_gc(_beg, _middle, _separation)
+            # right half
+            split_gc(_middle, _end, _separation)
+        else:
+            if _beg not in result:
+                result.append(_beg)
+            if _end not in result:
+                result.append(_end)
+
+    split_gc(_beg, _end, _separation)
+
+    return result
+
+
+def great_circle_segment_midpoint(_beg, _end):
+    """
+        'Split' great circle segment in halves
+    :param _beg: astropy SkyCoord instance, coordinates of 'start' point
+    :param _end: astropy SkyCoord instance, coordinates of 'end' point
+    :return:
+    """
+    # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
+    radec_beg = [_beg.ra.rad, _beg.dec.rad]
+    rdecra_beg = np.hstack([1.0, radec_beg[::-1]])
+    cart_beg = sph2cart(rdecra_beg)
+
+    radec_end = [_end.ra.rad, _end.dec.rad]
+    rdecra_end = np.hstack([1.0, radec_end[::-1]])
+    cart_end = sph2cart(rdecra_end)
+
+    # compute midpoint of the _shorter_ segment of GC passing through _beg and _end
+    # negate the result to get the same for the _longer_ segment
+    lamb = 1 + np.dot(cart_beg, cart_end) / 1.0 ** 2
+    middle_cart = (cart_beg + cart_end) / np.sqrt(2.0 * lamb)
+    rdecra_middle = cart2sph(middle_cart)
+    radec_middle = rdecra_middle[:-3:-1]
+    # print(radec_middle)
+
+    middle = SkyCoord(ra=radec_middle[0], dec=radec_middle[1], unit=[u.rad, u.rad], frame='icrs')
+
+    return middle, radec_middle
 
 
 def get_line(start, end):
@@ -569,24 +633,46 @@ class Target(object):
         return out_str + '>>'
 
     def to_dict(self):
+        """
+            to be jsonified
+        :return:
+        """
+        # mean_epoch_str = self.epoch.datetime.strftime('%Y%m%d_%H%M%S.%f')
+        mean_epoch_str = '{:.11f}'.format(self.epoch.jd)
+        radec = [hms(self.radec[0]), dms(self.radec[1])]
+        ra_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(*radec[0])
+        if radec[1][0] >= 0:
+            dec_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
+        else:
+            dec_str = '{:03.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
         out_dict = OrderedDict([['name', self.object.name],
-                                ['magnitude', self.mag],
-                                ['mean_epoch', self.epoch.datetime.strftime('%Y%m%d_%H%M%S.%f')],
-                                ['mean_radec', self.radec],
-                                ['mean_radec_dot', self.radec_dot],
+                                ['magnitude', '{:.3f}'.format(self.mag)],
+                                ['mean_epoch', mean_epoch_str],
+                                ['mean_radec', [ra_str, dec_str]],
+                                ['mean_radec_dot', ['{:.5f}'.format(self.radec_dot[0]),
+                                                    '{:.5f}'.format(self.radec_dot[1])]],
                                 ['meridian_crossing', str(self.meridian_crossing).lower()],
                                 ['is_observable', str(self.is_observable).lower()],
                                 ['guide_stars', []]
                                ])
+        # save the date:
+        out_dict['comment'] = 'modified_{:s}_UTC'.format(str(datetime.datetime.utcnow()))
         if self.guide_stars is not None:
             for star in self.guide_stars[::-1]:
+                radec = [hms(star[1][0]*np.pi/180), dms(star[1][1]*np.pi/180)]
+                ra_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(*radec[0])
+                if radec[1][0] >= 0:
+                    dec_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
+                else:
+                    dec_str = '{:03.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
                 out_dict['guide_stars'].append(OrderedDict([['id', star[0]],
-                                                            ['radec', star[1]],
-                                                            ['magnitude', float(star[2])],
-                                                            ['min_separation', float(star[3])],
+                                                            ['radec', [ra_str, dec_str]],
+                                                            ['magnitude', '{:.3f}'.format(float(star[2]))],
+                                                            ['min_separation', '{:.3f}'.format(float(star[3]))],
                                                             ['obs_window',
                                                              [star[4][0].datetime.strftime('%Y%m%d_%H%M%S.%f'),
-                                                              star[4][1].datetime.strftime('%Y%m%d_%H%M%S.%f')]]
+                                                              star[4][1].datetime.strftime('%Y%m%d_%H%M%S.%f')]],
+                                                            ['finding_chart', star[5]]
                                                             ]))
         return '_'.join(out_dict['name'].split(' ')), out_dict
 
@@ -680,6 +766,8 @@ class Target(object):
         :param _margin: padd window with margin arcsec (one-sided margin)
         :return:
         """
+        global viz
+
         if self.observability_windows is None:
             print('compute observability windows first before looking for guide stars')
             return
@@ -711,54 +799,95 @@ class Target(object):
                                                              output_Vmag=True)
             radec_stop = np.array(radec_stop)
             radec_stop_sc = SkyCoord(ra=radec_stop[0], dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
-
-            print('arc length: ', radec_stop_sc.separation(radec_start_sc))
-
-            # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
-            rdecra_start = np.hstack([1.0, radec_start[::-1]])
             rdecra_stop = np.hstack([1.0, radec_stop[::-1]])
-            start_cart = sph2cart(rdecra_start)
             stop_cart = sph2cart(rdecra_stop)
 
-            # middle point for the 'FoV':
-            lamb = 1 + np.dot(start_cart, stop_cart) / 1.0 ** 2
-            middle_cart = (start_cart + stop_cart) / np.sqrt(2.0 * lamb)
-            rdecra_middle = cart2sph(middle_cart)
-            radec_middle = rdecra_middle[:-3:-1]
+            arc_len = radec_stop_sc.separation(radec_start_sc)
+            print('arc length: ', arc_len)
+
+            # trajectory midpoint:
+            middle, radec_middle = great_circle_segment_midpoint(radec_start_sc, radec_stop_sc)
 
             # 'FoV' size + margins at both sides:
-            ra_size = SkyCoord(ra=radec_start[0], dec=0, unit=(u.rad, u.rad), frame='icrs').\
+            ra_size = SkyCoord(ra=radec_start[0], dec=0, unit=(u.rad, u.rad), frame='icrs'). \
                 separation(SkyCoord(ra=radec_stop[0], dec=0, unit=(u.rad, u.rad), frame='icrs')).rad
             dec_size = SkyCoord(ra=0, dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs'). \
                 separation(SkyCoord(ra=0, dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')).rad
-            window_size = np.array([ra_size, dec_size]) + 2.0*np.array([_margin*np.pi/180.0/3600,
-                                                                        _margin*np.pi/180.0/3600])
-            # in arcsec:
-            print('window_size in \":', window_size*180.0/np.pi*3600)
+            window_size = np.array([ra_size, dec_size]) + 2.0 * np.array([_margin * np.pi / 180.0 / 3600,
+                                                                          _margin * np.pi / 180.0 / 3600])
+
+            # search large 'quadrant' around trajectory midpoint for "smaller" fields (<0.5 degree)
+            if arc_len.deg < 0.5:
+
+                # in arcsec:
+                print('window_size in \":', window_size*180.0/np.pi*3600)
+
+                # do a 'global' search
+                # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
+                # grid_stars = viz.query_region(target, width=window_size[0] * u.rad, height=window_size[1] * u.rad,
+                #                               catalog=_guide_star_cat)
+                grid_stars = viz.query_region(middle, radius=np.max(window_size) * u.rad, catalog=_guide_star_cat)
+                if len(list(grid_stars.keys())) == 0:
+                    # no stars found? proceed to next window
+                    continue
+                # else pick the table with the Gaia catalogue:
+                grid_stars = grid_stars[_guide_star_cat]
+                # print(grid_stars)
+            else:
+                # for large fields, 'split' the trajectory and search in a smaller field around each 'pointing'
+                # along the trajectory:
+                multiplier = 10  # too many Vizier queries makes it run pretty slowly
+                pointings = split_great_circle_segment(radec_start_sc, radec_stop_sc, _radius*multiplier)
+                # search radius for individual pointing follows from Napier's formula (R1) for right sph. triangles
+                search_radius = np.arccos(np.cos(pointings[0].separation(pointings[1]).rad) *
+                                          np.cos(radius_rad*multiplier))
+
+                print('Split trajectory into {:d} pointings with search radius of {:.1f}\"'.
+                      format(len(pointings), search_radius * 180.0 / np.pi * 3600.0))
+                # iterate over pointings, discard duplicates (if any)
+                tables = []
+                # global viz
+                # print(pointings)
+                if len(pointings) > 50:
+                    print('Moves very fast, will only consider the first 30 pointings')
+                for pi, pointing in enumerate(pointings[:50]):
+                    print('querying pointing #{:d}'.format(pi+1))
+                    # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
+                    grid_stars_pointing = viz.query_region(pointing, search_radius * u.rad, catalog=_guide_star_cat)
+                    if len(list(grid_stars_pointing.keys())) == 0:
+                        # no stars found? proceed to next pointing
+                        continue
+                    print('number of stars in this pointing:', len(grid_stars_pointing[_guide_star_cat]))
+                    tables.append(grid_stars_pointing[_guide_star_cat])
+                print('number of pointings with stars:', len(tables))
+                if len(tables) == 1:
+                    grid_stars = tables[0]
+                elif len(tables) > 1:
+                    grid_stars = table.vstack(tables)
+                    grid_stars = table.unique(grid_stars, keys='Source')
+                    # print(grid_stars)
+                else:
+                    # no stars? proceed to next obs. window
+                    continue
+
+            print(grid_stars)
+
+            # guide star magnitudes:
+            grid_star_mags = np.array(grid_stars['__Gmag_'])
+            # those that are bright enough for tip-tilt:
+            mag_mask = grid_star_mags <= _m_lim_gs
 
             # window time span
             window_t_span = t_stop - t_start
 
-            target = coord.SkyCoord(ra=radec_middle[0], dec=radec_middle[1], unit=(u.rad, u.rad), frame='icrs')
-            global viz
-            # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
-            grid_stars = viz.query_region(target, width=window_size[0]*u.rad, height=window_size[1]*u.rad,
-                                          catalog=_guide_star_cat)
-            if len(list(grid_stars.keys())) == 0:
-                # no stars found? proceed to next window
-                continue
-
-            # guide star magnitudes:
-            grid_star_mags = np.array(grid_stars[_guide_star_cat]['__Gmag_'])
-            # those that are bright enough for tip-tilt:
-            mag_mask = grid_star_mags <= _m_lim_gs
-
-            # if _plot_field:
-            #     self.plot_field(target, window_size=window_size,
-            #                     radec_start=radec_start, vmag_start=vmag_start,
-            #                     radec_stop=radec_stop, vmag_stop=vmag_stop,
-            #                     exposure=t_stop-t_start,
-            #                     _model_psf=_model_psf, grid_stars=grid_stars[_guide_star_cat])
+            if False:
+                self.plot_field(middle, window_size=window_size,
+                                radec_start=radec_start, vmag_start=vmag_start,
+                                radec_stop=radec_stop, vmag_stop=vmag_stop,
+                                exposure=t_stop-t_start,
+                                _model_psf=_model_psf, grid_stars=grid_stars,
+                                _highlight_brighter_than_mag=_m_lim_gs,
+                                _display_plot=True)
 
             ''' compute distances from stars, return those (bright ones) that can be used as guide stars '''
             # to compute distance from a star to a great circle segment,
@@ -790,13 +919,13 @@ class Target(object):
             lonlat_start = rotate_radec(radec_start, radec_start, angle_stop)
             lonlat_stop = rotate_radec(radec_stop, radec_start, angle_stop)
 
-            for star in grid_stars[_guide_star_cat][mag_mask]:
+            for star in grid_stars[mag_mask]:
                 radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0  # [rad]
                 # transform our star into the new system:
                 lonlat = rotate_radec(radec_star, radec_start, angle_stop)
 
                 # astropy distances:
-                star_sc = SkyCoord(ra=radec_star[0], dec=radec_star[1], unit=(u.rad, u.rad), frame='icrs')
+                # star_sc = SkyCoord(ra=radec_star[0], dec=radec_star[1], unit=(u.rad, u.rad), frame='icrs')
                 # print(star['Source'], star_sc.separation(radec_start_sc), star_sc.separation(radec_stop_sc))
 
                 # distance from star to asteroid track is simply the latitude in the rotated CS
@@ -839,26 +968,52 @@ class Target(object):
                     # print(t_start_star, t_stop_star)
 
                     # save:
-                    # name [RA, Dec] min_distance_in_arcsec [window_start_time, window_stop_time]
+                    # name [RA, Dec] min_distance_in_arcsec [window_start_time, window_stop_time], finding_chart_png
                     self.guide_stars.append([star['Source'], [star['RA_ICRS'], star['DE_ICRS']], star['__Gmag_'],
-                                             min_distance*180.0/np.pi*3600, [t_start_star, t_stop_star]])
+                                             min_distance*180.0/np.pi*3600, [t_start_star, t_stop_star],
+                                             'not available'])
 
-                    if _plot_field:
-                    # if True:
-                        radec_start_star, _, vmag_start_star = self.object.raDecVmag(t_start_star.mjd, _jpl_eph,
+                # else:
+                #     print('too far away')
+
+        # keep 5 closest and 5 brightest, plot 'finding charts'
+        if len(self.guide_stars) > 0:
+            self.guide_stars = np.array(self.guide_stars)
+
+            grid_stars_closest = self.guide_stars[self.guide_stars[:, 3].argsort(), :][:5, :]
+            grid_stars_brightest = self.guide_stars[self.guide_stars[:, 2].argsort(), :][:5, :]
+            best_grid_stars = grid_stars_closest
+            # print(best_grid_stars.shape)
+            for star in grid_stars_brightest:
+                if star not in best_grid_stars:
+                    best_grid_stars = np.append(best_grid_stars, np.expand_dims(star, 0), axis=0)
+                    # print(best_grid_stars.shape)
+
+            self.guide_stars = best_grid_stars
+
+            if _plot_field:
+                for si, star in enumerate(self.guide_stars):
+                    try:
+                        # print(star)
+                        star_name, star_radec, star_mag, star_min_dist, star_obs_window, _ = star
+                        # print(star_name, star_radec, star_mag, star_min_dist, star_obs_window)
+                        # if False:
+                        radec_start_star, _, vmag_start_star = self.object.raDecVmag(star_obs_window[0].mjd, _jpl_eph,
                                                                                      epoch='J2000',
-                                                                           station=sta_compute_position_GCRS(_station,
-                                                                                                             _eops,
-                                                                                                     t_start_star.mjd),
-                                                                           output_Vmag=True)
+                                                                                     station=sta_compute_position_GCRS(
+                                                                                         _station,
+                                                                                         _eops,
+                                                                                         star_obs_window[0].mjd),
+                                                                                     output_Vmag=True)
                         radec_start_star = np.array(radec_start_star)
                         # end of the 'arc'
-                        radec_stop_star, _, vmag_stop_star = self.object.raDecVmag(t_stop_star.mjd, _jpl_eph,
+                        radec_stop_star, _, vmag_stop_star = self.object.raDecVmag(star_obs_window[1].mjd, _jpl_eph,
                                                                                    epoch='J2000',
-                                                                         station=sta_compute_position_GCRS(_station,
-                                                                                                           _eops,
-                                                                                                       t_stop_star.mjd),
-                                                                         output_Vmag=True)
+                                                                                   station=sta_compute_position_GCRS(
+                                                                                       _station,
+                                                                                       _eops,
+                                                                                       star_obs_window[1].mjd),
+                                                                                   output_Vmag=True)
                         radec_stop_star = np.array(radec_stop_star)
 
                         # want to center on the track instead?
@@ -879,8 +1034,8 @@ class Target(object):
                             separation(SkyCoord(ra=radec_stop_star[0], dec=0, unit=(u.rad, u.rad), frame='icrs')).rad
                         dec_size_star = SkyCoord(ra=0, dec=radec_start_star[1], unit=(u.rad, u.rad), frame='icrs'). \
                             separation(SkyCoord(ra=0, dec=radec_stop_star[1], unit=(u.rad, u.rad), frame='icrs')).rad
-                        window_size_star = np.array([ra_size_star, dec_size_star]) \
-                            + 2.0 * np.array([_margin * np.pi / 180.0 / 3600, _margin * np.pi / 180.0 / 3600])
+                        window_size_star = np.array([ra_size_star, dec_size_star]) + 2.0 * np.array(
+                                                        [_margin * np.pi / 180.0 / 3600, _margin * np.pi / 180.0 / 3600])
 
                         # Robo-AO VIC FoV is 36"x36":
                         # window_size_star = np.array([36 * np.pi / 180.0 / 3600, 36 * np.pi / 180.0 / 3600])
@@ -891,28 +1046,34 @@ class Target(object):
                         window_t_span_star = t_stop_star - t_start_star
 
                         # stars in the field (without mag cut-off):
+                        star_sc = SkyCoord(ra=star_radec[0], dec=star_radec[1], unit=(u.deg, u.deg), frame='icrs')
                         fov_stars = viz.query_region(star_sc, width=window_size_star[0] * u.rad,
                                                      height=window_size_star[1] * u.rad,
                                                      catalog=_guide_star_cat)
 
                         # center plot on star:
-                        print('plotting', self.object.name, star['Source'], t_start_star, t_stop_star)
+                        print('plotting', self.object.name, star_name, star_obs_window[0], star_obs_window[1])
                         plot_name = '_'.join(self.object.name.split(' ')) + '__' + \
-                                    '_'.join(str(star['Source']).split(' '))
+                                    '_'.join(str(star_name).split(' '))
                         self.plot_field(star_sc, window_size=window_size_star,
                                         radec_start=radec_start_star, vmag_start=vmag_start_star,
                                         radec_stop=radec_stop_star, vmag_stop=vmag_stop_star,
                                         exposure=window_t_span_star,
                                         _model_psf=_model_psf, grid_stars=fov_stars[_guide_star_cat],
+                                        _highlight_brighter_than_mag=_m_lim_gs,
                                         _display_plot=_display_plot, _save_plot=_save_plot,
                                         path=_path_nightly_date, name=plot_name)
-                # else:
-                #     print('too far away')
+                        # save the name if succesful:
+                        self.guide_stars[si, -1] = '{:s}.png'.format(plot_name)
+                    except Exception as e:
+                        print(e)
+                        traceback.print_exc()
+
         print('\t number of possible guide stars: {:d}'.format(len(self.guide_stars)))
 
     @staticmethod
     def plot_field(target, window_size, radec_start, vmag_start, radec_stop, vmag_stop,
-                   exposure, _model_psf, grid_stars, scale_bar_size=20,
+                   exposure, _model_psf, grid_stars, _highlight_brighter_than_mag=16.0, scale_bar_size=20,
                    _display_plot=False, _save_plot=False, path='./', name='field'):
         """
 
@@ -1015,6 +1176,13 @@ class Target(object):
                          layer='marker_set_2', edgecolor=plt.cm.Oranges(0.5),
                          facecolor=plt.cm.Oranges(0.3), marker='x', s=50, alpha=0.7, linewidths=3)
 
+        # highlight stars bright enough to serve as tip-tilt guide stars:
+        mask_bright = mag_stars >= _highlight_brighter_than_mag
+        if np.max(mask_bright) == 1:
+            fig.show_markers(grid_stars['RA_ICRS'], grid_stars['DE_ICRS'],
+                             layer='marker_set_2', edgecolor=plt.cm.Oranges(0.9),
+                             facecolor=plt.cm.Oranges(0.8), marker='+', s=50, alpha=0.9, linewidths=1)
+
         # fig.show_arrows([asteroid_start.ra.rad*u.rad], [asteroid_start.dec.rad*u.rad],
         #                 [np.sign(pix_asteroid[1, 0] - pix_asteroid[0, 0]) *
         #                 coord.SkyCoord(ra=radec_start[0], dec=0, unit=(u.rad, u.rad), frame='icrs').
@@ -1033,13 +1201,14 @@ class Target(object):
         # remove frame
         fig.frame.set_linewidth(0)
 
+        if _display_plot:
+            plt.show()
+
         if _save_plot:
             if not os.path.exists(path):
                 os.makedirs(path)
             fig.save(os.path.join(path, '{:s}.png'.format(name)))
-
-        if _display_plot:
-            plt.show()
+            fig.close()
 
 
 class TargetListAsteroids(object):
@@ -2186,7 +2355,8 @@ if __name__ == '__main__':
     now = datetime.datetime.now(pytz.timezone(timezone))
     # today = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=1)
     # date = datetime.datetime(now.year, now.month, now.day) - datetime.timedelta(days=11)
-    for dd in range(14):
+    for dd in range(0, 2):
+    # for dd in [-18]:
         date = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=dd)
         print('running computation for:', date)
 
