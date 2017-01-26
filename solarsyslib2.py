@@ -239,14 +239,45 @@ def great_circle_segment_midpoint(_beg, _end):
     return middle, radec_middle
 
 
+@jit
 def great_circle_distance(phi1, lambda1, phi2, lambda2):
     # input: dec1, ra1, dec2, ra2 [rad]
     # this is orders of magnitude faster than astropy.coordinates.Skycoord.separation
-    delta_lambda = lambda2 - lambda1
+    delta_lambda = np.abs(lambda2 - lambda1)
     return np.arctan2(np.sqrt((np.cos(phi2)*np.sin(delta_lambda))**2
                               + (np.cos(phi1)*np.sin(phi2) - np.sin(phi1)*np.cos(phi2)*np.cos(delta_lambda))**2),
                       np.sin(phi1)*np.sin(phi2) + np.cos(phi1)*np.cos(phi2)*np.cos(delta_lambda))
 
+
+@jit
+def find_min(fun):
+    """
+      Find function minimum using a cubic fit
+    :param fun:
+    :return:
+    """
+
+    # mx = np.max(fun)
+    # jmax = np.argmax(fun)
+    mx = np.min(fun)
+    jmax = np.argmin(fun)
+
+    # first or last element?
+    if jmax == 0 or jmax == len(fun)-1:
+        return jmax, mx, jmax, mx
+
+    # if not - make a cubic fit
+    a2 = 0.5 * (fun[jmax - 1] + fun[jmax + 1] - 2.0 * fun[jmax])
+    a1 = 0.5 * (fun[jmax + 1] - fun[jmax - 1])
+    djx = -a1 / (2.0 * a2)
+    xmax = jmax + djx
+
+    yfit = np.polyfit([-1, 0, 1], fun[jmax - 1: jmax + 2], 2)
+    ymax = np.polyval(yfit, djx)
+    # dydx = np.polyval(np.polyder(yfit), djx)  # must be 0
+    # print(mx, jmax, xmax, ymax, dydx)
+
+    return jmax, mx, xmax, ymax
 
 
 def get_line(start, end):
@@ -912,7 +943,7 @@ class Target(object):
                     # no stars? proceed to next obs. window
                     continue
 
-            print(grid_stars)
+            # print(grid_stars)
 
             # guide star magnitudes:
             grid_star_mags = np.array(grid_stars['__Gmag_'])
@@ -928,35 +959,106 @@ class Target(object):
             # and search for minimum over the arc, then do a local fit to find the moment of closest approach
             # and compute time window and reference position using that.
 
-            ''' alternative approach: compute 'v lob' and using great circle -- comparison '''
-            print(t_start, t_stop, window_t_span)
+            ''' compute distances from stars, return those (bright ones) that can be used as guide stars '''
+            # print(t_start, t_stop, window_t_span)
+
+            # first, 'split' the trajectory into separate positions that are ~radius_rad/2 apart
+            t_step = (radius_rad/2.0 * window_t_span) / arc_len.rad
+            n_positions = int(np.ceil(arc_len.rad / radius_rad)) * 2
             radecs = []
             radec_dots = []
-            for ii in range(30):
-                ti = t_start + window_t_span*ii/30.0
+            for ii in range(n_positions):
+                ti = t_start + t_step*ii
                 rd, rddot, _ = self.object.raDecVmag(ti.mjd, _jpl_eph, epoch='J2000',
                                                      station=sta_compute_position_GCRS(_station, _eops, ti.mjd),
                                                      output_Vmag=True)
                 radecs.append(rd)
                 radec_dots.append(rddot)
+            # print(radecs)
             radecs = np.array(radecs)
-            radec_dots = np.array(radec_dots)
+            radec_dots = np.array(radec_dots)  # these are in "/s
+            # mean velocity along track:
+            # v_along_track_mean = np.sqrt(np.mean(radec_dots[:, 0]) ** 2 + np.mean(radec_dots[:, 1]) ** 2)
+            # print('v_along_track_mean:', v_along_track_mean)
+            # print(arc_len.deg/3600.0 / window_t_span.sec)
+
+            print('{:d} stars brighter than {:.3f}'.format(len(grid_stars[mag_mask]), _m_lim_gs))
 
             for star in grid_stars[mag_mask]:
+                # grab a star by the coordinates :)
                 radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0  # [rad]
+                # print('radec_star', radec_star)
 
-            pntgs = split_great_circle_segment(radec_start_sc, radec_stop_sc, 3.5)
-            print(pntgs)
-            pntgs = np.array([[pt.ra.rad, pt.dec.rad] for pt in pntgs])
+                # astropy distances:
+                star_sc = SkyCoord(ra=radec_star[0], dec=radec_star[1], unit=(u.rad, u.rad), frame='icrs')
 
-            fig = plt.figure('aa')
-            ax = fig.add_subplot(111)
-            ax.plot(radecs[:, 0], radecs[:, 1], '.', c=plt.cm.Blues(0.8))
-            ax.plot(pntgs[:, 0], pntgs[:, 1], '.', c=plt.cm.Greens(0.8))
-            plt.show()
+                separations = np.array([great_circle_distance(radec_star[1], radec_star[0], radec[1], radec[0])
+                                        for radec in radecs])
 
-            raw_input()
+                # close enough?
+                if np.min(separations) < radius_rad:
+                    print('{:s}:'.format(self.object.name), star['Source'], 'is close enough!')
 
+                    index_min, _, index_min_interpolated, distance_track = find_min(separations)
+                    t_approach_star = t_start + t_step*index_min_interpolated
+                    # get relevant derivatives ([almost] at the time of closest encounter):
+                    radec_dot = radec_dots[index_min]
+                    # asteroid apparent velocity along track ["/s] around t_closest_encounter:
+                    v_along_track = np.sqrt(radec_dot[0]**2 + radec_dot[1]**2)
+
+                    # arc length from closest point to star on star track (extension)
+                    # to furthest such that distance to it <= radius_rad:
+                    arc = np.arccos(np.cos(radius_rad) / np.cos(distance_track))
+                    # print('arc len ": ', arc*180/np.pi*3600)
+
+                    t_span = (arc / arc_len.rad) * window_t_span
+
+                    # tracking start and stop times
+                    t_start_star = np.max([t_start, t_approach_star - t_span])
+                    t_stop_star = np.min([t_stop, t_approach_star + t_span])
+
+                    # _radec_start, _, _ = self.object.raDecVmag(t_start_star.mjd,
+                    #                                            _jpl_eph, epoch='J2000',
+                    #                                            station=sta_compute_position_GCRS(_station,
+                    #                                                                              _eops,
+                    #                                                                              t_start_star.mjd),
+                    #                                            output_Vmag=True)
+                    # _radec_start = np.array(_radec_start)
+                    # _radec_start_sc = SkyCoord(ra=_radec_start[0], dec=_radec_start[1], unit=(u.rad, u.rad),
+                    #                            frame='icrs')
+                    #
+                    # _radec_approach, _, _ = self.object.raDecVmag(t_approach_star.mjd,
+                    #                                               _jpl_eph, epoch='J2000',
+                    #                                               station=sta_compute_position_GCRS(_station,
+                    #                                                                                 _eops,
+                    #                                                                                 t_approach_star.mjd),
+                    #                                               output_Vmag=True)
+                    # _radec_approach = np.array(_radec_approach)
+                    # _radec_approach_sc = SkyCoord(ra=_radec_approach[0], dec=_radec_approach[1], unit=(u.rad, u.rad),
+                    #                               frame='icrs')
+                    # print('closest approach point from time considerations:', _radec_approach_sc)
+                    #
+                    # # end of the 'arc'
+                    # _radec_stop, _, _ = self.object.raDecVmag(t_stop_star.mjd,
+                    #                                           _jpl_eph, epoch='J2000',
+                    #                                           station=sta_compute_position_GCRS(_station, _eops,
+                    #                                                                             t_stop_star.mjd),
+                    #                                           output_Vmag=True)
+                    # _radec_stop = np.array(_radec_stop)
+                    # _radec_stop_sc = SkyCoord(ra=_radec_stop[0], dec=_radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
+                    #
+                    # print('distances to start, approach, stop')
+                    # print(star_sc.separation(_radec_start_sc),
+                    #       star_sc.separation(_radec_approach_sc),
+                    #       star_sc.separation(_radec_stop_sc))
+                    #
+                    # raw_input('uh?')
+
+                    # save:
+                    # name [RA, Dec] min_distance_in_arcsec [window_start_time, window_stop_time], finding_chart_png
+                    self.guide_stars.append([star['Source'], [star['RA_ICRS'], star['DE_ICRS']], star['__Gmag_'],
+                                             distance_track * 180.0 / np.pi * 3600, [t_start_star, t_stop_star],
+                                             'not available'])
 
             if False:
                 self.plot_field(middle, window_size=window_size,
@@ -966,161 +1068,6 @@ class Target(object):
                                 _model_psf=_model_psf, grid_stars=grid_stars,
                                 _highlight_brighter_than_mag=_m_lim_gs,
                                 _display_plot=True)
-
-            ''' compute distances from stars, return those (bright ones) that can be used as guide stars '''
-            # to compute distance from a star to a great circle segment,
-            # we first rotate the (Cartesian) coordinate system so that the start point of the segment radec_start
-            # (position of asteroid at the beginning of the window) has the coordinates (1,0,0) in
-            # the new system. To do that, first rotate around Z by RA (of radec_start) and then around Y by -Dec
-
-            # the rotation for a vector vec will be:
-            # iau_RY(-radec_start[1], iau_RZ(radec_start[0], vec))
-
-            # next, find the coordinates of the stop point in the rotated system, and convert to spherical coordinates:
-            stop_sph_intermediate = cart2sph(rotation(stop_cart, radec_start, 0.0))
-
-            # we can now compute the angle between the great circle passing through the stop point
-            # and the 'intermediate' rotated system. We use one of Napier's rules
-            # for right spherical triangles for that:
-            # [see https://en.wikipedia.org/wiki/Spherical_trigonometry]
-            # angle_stop = np.arctan(np.tan(stop_sph_intermediate[1]) / np.sin(stop_sph_intermediate[2]))
-            angle_stop = np.arctan2(np.tan(stop_sph_intermediate[1]), np.sin(stop_sph_intermediate[2]))
-
-            # finally, we rotate the intermediate system around its X axis by angle_stop so that the
-            # stop point ends up on the (yet another new) XY plane
-            # print(rotation(start_cart, radec_start, angle_stop))
-            # print(rotation(stop_cart, radec_start, angle_stop))
-
-            # coordinates of the stop point are now (cos(theta), sin(theta), 0):
-            # theta = np.arccos(np.dot(start_cart, stop_cart))
-            # print('cos(0), sin(0)', np.array([np.cos(theta), np.sin(theta)]))
-
-            lonlat_start = rotate_radec(radec_start, radec_start, angle_stop)
-            lonlat_stop = rotate_radec(radec_stop, radec_start, angle_stop)
-            # print(lonlat_start, lonlat_stop)
-            # print(radec_start, radec_stop)
-            # print(derotate_lonlat(lonlat_start, radec_start, angle_stop),
-            #       derotate_lonlat(lonlat_stop, radec_start, angle_stop))
-
-            print('{:d} stars brighter than {:.3f}'.format(len(grid_stars[mag_mask]), _m_lim_gs))
-
-            for star in grid_stars[mag_mask]:
-                radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0  # [rad]
-                # transform our star into the new system:
-                lonlat = rotate_radec(radec_star, radec_start, angle_stop)
-
-                # astropy distances:
-                star_sc = SkyCoord(ra=radec_star[0], dec=radec_star[1], unit=(u.rad, u.rad), frame='icrs')
-                # print(star['Source'], star_sc.separation(radec_start_sc), star_sc.separation(radec_stop_sc))
-
-                # distance from star to asteroid track is simply the latitude in the rotated CS
-                distance_track = np.abs(lonlat[1])
-                # distance to start of track:
-                distance_start = np.abs(np.arccos(np.cos(lonlat_start[0] - lonlat[0]) * np.cos(distance_track)))
-                # distance to end of track:
-                distance_stop = np.abs(np.arccos(np.cos(lonlat[0] - lonlat_stop[0]) * np.cos(distance_track)))
-                # print(star['Source'], 'distances to track, start, stop:')
-                # print(coord.Angle(distance_track, unit=u.rad).to_string(unit=u.degree),
-                #       coord.Angle(distance_start, unit=u.rad).to_string(unit=u.degree),
-                #       coord.Angle(distance_stop, unit=u.rad).to_string(unit=u.degree))
-
-                # save star in three possible cases:
-                # 1) lon_start <= lon <= lon_stop and distance_track <= radius_rad
-                # 2) lon > lon_end and distance_end <= radius_rad
-                # 3) lon < lon_start and distance_start <= radius_rad
-
-                close_enough = False
-                min_distance = -1
-                if lonlat_start[0] <= lonlat[0] <= lonlat_stop[0] and distance_track <= radius_rad:
-                    close_enough = True
-                    min_distance = distance_track
-                    radec_closest = derotate_lonlat([lonlat[0], 0.0], radec_start, angle_stop)
-                    closest_approach_point = SkyCoord(ra=radec_closest[0], dec=radec_closest[1],
-                                                      unit=(u.rad, u.rad), frame='icrs')
-                    # print('lala: ', min_distance, star_sc.separation(closest_approach_point).rad)
-                    print('closest approach point:', closest_approach_point)
-                elif lonlat[0] > lonlat_stop[0] and distance_stop <= radius_rad:
-                    close_enough = True
-                    min_distance = distance_stop
-                    closest_approach_point = radec_stop_sc
-                elif lonlat[0] < lonlat_start[0] and distance_start <= radius_rad:
-                    close_enough = True
-                    min_distance = distance_start
-                    closest_approach_point = radec_start_sc
-                # raw_input()
-
-                if close_enough:
-                    print('{:s}:'.format(self.object.name), star['Source'], 'is close enough!')
-
-                    # arc length from closest point to star on star track (extension)
-                    # to furthest such that distance to it <= radius_rad:
-                    arc = np.arccos(np.cos(radius_rad) / np.cos(distance_track))
-                    # print(arc)
-                    delta_t_approach = np.max([0, lonlat[0] / lonlat_stop[0]])
-                    delta_t_start = np.max([0, (lonlat[0] - arc) / lonlat_stop[0]])
-                    delta_t_stop = np.min([1, (lonlat[0] + arc) / lonlat_stop[0]])
-                    t_approach_star = t_start + delta_t_approach * window_t_span
-                    t_start_star = t_start + delta_t_start * window_t_span
-                    t_stop_star = t_start + delta_t_stop * window_t_span
-
-                    print(star['Source'], 'distances to track, start, stop:')
-                    # print(distance_track, distance_start, distance_stop)
-                    print(coord.Angle(distance_track, unit=u.rad).to_string(unit=u.degree),
-                          coord.Angle(distance_start, unit=u.rad).to_string(unit=u.degree),
-                          coord.Angle(distance_stop, unit=u.rad).to_string(unit=u.degree))
-
-                    _radec_start, _, _ = self.object.raDecVmag(Time(str(t_start_star), format='iso').mjd,
-                                                               _jpl_eph, epoch='J2000',
-                                                               station=sta_compute_position_GCRS(_station,
-                                                                                                 _eops,
-                                                                                                 Time(str(t_start_star),
-                                                                                                      format='iso').mjd),
-                                                               output_Vmag=True)
-                    _radec_start = np.array(_radec_start)
-                    _radec_start_sc = SkyCoord(ra=_radec_start[0], dec=_radec_start[1], unit=(u.rad, u.rad),
-                                               frame='icrs')
-
-                    _radec_approach, _, _ = self.object.raDecVmag(Time(str(t_approach_star), format='iso').mjd,
-                                                               _jpl_eph, epoch='J2000',
-                                                               station=sta_compute_position_GCRS(_station,
-                                                                                                 _eops,
-                                                                                                 Time(str(t_approach_star),
-                                                                                                      format='iso').mjd),
-                                                               output_Vmag=True)
-                    _radec_approach = np.array(_radec_approach)
-                    _radec_approach_sc = SkyCoord(ra=_radec_approach[0], dec=_radec_approach[1], unit=(u.rad, u.rad),
-                                                  frame='icrs')
-                    print('closest approach point from time considerations:', _radec_approach_sc)
-
-                    # end of the 'arc'
-                    _radec_stop, _, _ = self.object.raDecVmag(Time(str(t_stop_star), format='iso').mjd,
-                                                                     _jpl_eph, epoch='J2000',
-                                                                     station=sta_compute_position_GCRS(_station, _eops,
-                                                                                                       Time(str(
-                                                                                                   t_stop_star),
-                                                                                                   format='iso').mjd),
-                                                                     output_Vmag=True)
-                    _radec_stop = np.array(_radec_stop)
-                    _radec_stop_sc = SkyCoord(ra=_radec_stop[0], dec=_radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
-
-                    print('distances to start, approach, stop')
-                    print(star_sc.separation(_radec_start_sc),
-                          star_sc.separation(_radec_approach_sc),
-                          star_sc.separation(_radec_stop_sc))
-
-                    raw_input()
-
-                    # print(delta_t_start, delta_t_stop)
-                    # print(t_start_star, t_stop_star)
-
-                    # save:
-                    # name [RA, Dec] min_distance_in_arcsec [window_start_time, window_stop_time], finding_chart_png
-                    self.guide_stars.append([star['Source'], [star['RA_ICRS'], star['DE_ICRS']], star['__Gmag_'],
-                                             min_distance*180.0/np.pi*3600, [t_start_star, t_stop_star],
-                                             'not available'])
-
-                # else:
-                #     print('too far away')
 
         # keep 5 closest and 5 brightest, plot 'finding charts'
         if len(self.guide_stars) > 0:
