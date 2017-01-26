@@ -129,13 +129,13 @@ def get_dates(start=None, stop=None):
             start = datetime.datetime(2016, 12, 1)
 
     if stop is None:
-        stop = datetime.datetime.utcnow()
+        stop = datetime.datetime.utcnow() + datetime.timedelta(days=30)
     else:
         try:
             stop = datetime.datetime.strptime(stop, '%Y%m%d')
         except Exception as _e:
             print(_e)
-            stop = datetime.datetime.utcnow()
+            stop = datetime.datetime.utcnow() + datetime.timedelta(days=30)
 
     dates = OrderedDict()
 

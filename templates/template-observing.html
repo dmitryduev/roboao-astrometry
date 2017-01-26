@@ -132,8 +132,7 @@
                             <thead style="border-bottom: none;">
                             <tr>
                                 {% for key in ('name', 'mag', 'mean_epoch_UTC', 'mean_RA', 'mean_Dec',
-                                               'mean_RA_dot', 'mean_Dec_dot', 'meridian_crossing',
-                                               'observable',
+                                               'mean_RA_dot', 'mean_Dec_dot', 'observable', 'meridian_crossing',
                                                'guide_star_id', 'guide_star_RA', 'guide_star_Dec', 'guide_star_mag',
                                                'guide_star_min_d', 'guide_star_obs_win', 'finding_chart',
                                                'comment')%}
@@ -162,7 +161,7 @@
                                             name="{{ key }}"
                                         {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[object][key][1] }}</td>
                                     {% endfor %}
-                                    {% for key in ('meridian_crossing', 'is_observable')%}
+                                    {% for key in ('is_observable', 'meridian_crossing')%}
                                         {% set class = 'success' if data[object][key] == 'true' else 'danger' %}
                                         <td style="border-right: solid 1px #DDDDDD;" name="{{ key }}"
                                         {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>
@@ -186,7 +185,7 @@
                                                    name="gs_id">
                                                     <img src="data/{{ date }}/{{ guide_star['finding_chart'] }}"
                                                      alt="{{ aux_key }}" class="img-responsive pop"
-                                                     style="cursor:pointer; cursor: hand;">
+                                                     style="cursor:pointer; cursor: hand; width:200px;">
 {#                                                    <span src="data/{{ date }}/{{ guide_star['finding_chart'] }}"#}
 {#                                                       class="pop" style="cursor:pointer; cursor: hand;">#}
 {#                                                        show</span>#}
@@ -220,7 +219,7 @@
                                                            name="gs_id">
                                                     <img src="data/{{ date }}/{{ guide_star['finding_chart'] }}"
                                                      alt="{{ aux_key }}" class="img-responsive pop"
-                                                     style="cursor:pointer; cursor: hand;">
+                                                     style="cursor:pointer; cursor: hand; width:200px;">
 {#                                                    <span src="data/{{ date }}/{{ guide_star['finding_chart'] }}"#}
 {#                                                       class="pop" style="cursor:pointer; cursor: hand;">#}
 {#                                                        show</span>#}

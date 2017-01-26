@@ -153,6 +153,33 @@ def rotate_radec(_radec, _radec_start, _angle_stop):
     return cart2sph(rotation(cart, _radec_start, _angle_stop))[:-3:-1]
 
 
+def derotation(_vec, _radec_start, _angle_stop):
+    """
+        Transformation, inverse to rotation()
+    :param _vec:
+    :param _radec_start:
+    :param _angle_stop:
+    :return:
+    """
+    return iau_RZ(-_radec_start[0], iau_RY(_radec_start[1], iau_RX(-_angle_stop, _vec)))
+
+
+def derotate_lonlat(_lonlat, _radec_start, _angle_stop):
+    """
+        Rotate _lonlat to the system described in the definition of derotation()
+    :param _lonlat: [lon, lat] in rad
+    :param _radec_start: [RA, Dec] in rad
+    :param _angle_stop: rad
+    :return: [lon, lat] in rad (corresponding to RA and Dec)
+    """
+    rlatlon = np.hstack([1.0, _lonlat[::-1]])
+    cart = sph2cart(rlatlon)
+    _radec = cart2sph(derotation(cart, _radec_start, _angle_stop))[:-3:-1]
+    if _radec[0] < 0:
+        _radec[0] += 2.0 * np.pi
+    return _radec
+
+
 def split_great_circle_segment(_beg, _end, _separation):
     """
         Iteratively split great circle segment until separation between consecutive points is <=_separation
@@ -210,6 +237,16 @@ def great_circle_segment_midpoint(_beg, _end):
     middle = SkyCoord(ra=radec_middle[0], dec=radec_middle[1], unit=[u.rad, u.rad], frame='icrs')
 
     return middle, radec_middle
+
+
+def great_circle_distance(phi1, lambda1, phi2, lambda2):
+    # input: dec1, ra1, dec2, ra2 [rad]
+    # this is orders of magnitude faster than astropy.coordinates.Skycoord.separation
+    delta_lambda = lambda2 - lambda1
+    return np.arctan2(np.sqrt((np.cos(phi2)*np.sin(delta_lambda))**2
+                              + (np.cos(phi1)*np.sin(phi2) - np.sin(phi1)*np.cos(phi2)*np.cos(delta_lambda))**2),
+                      np.sin(phi1)*np.sin(phi2) + np.cos(phi1)*np.cos(phi2)*np.cos(delta_lambda))
+
 
 
 def get_line(start, end):
@@ -638,7 +675,7 @@ class Target(object):
         :return:
         """
         # mean_epoch_str = self.epoch.datetime.strftime('%Y%m%d_%H%M%S.%f')
-        mean_epoch_str = '{:.11f}'.format(self.epoch.jd)
+        mean_epoch_str = '{:.11f}'.format(self.epoch.jyear)
         radec = [hms(self.radec[0]), dms(self.radec[1])]
         ra_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(*radec[0])
         if radec[1][0] >= 0:
@@ -785,14 +822,19 @@ class Target(object):
         for window in self.observability_windows:
             # start of the 'arc'
             t_start = window[0]
+            # position of asteroid at arc start
             radec_start, _, vmag_start = self.object.raDecVmag(t_start.mjd, _jpl_eph, epoch='J2000',
                                                                station=sta_compute_position_GCRS(_station, _eops,
                                                                                                  t_start.mjd),
                                                                output_Vmag=True)
             radec_start = np.array(radec_start)
             radec_start_sc = SkyCoord(ra=radec_start[0], dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs')
+            rdecra_start = np.hstack([1.0, radec_start[::-1]])
+            # convert to cartesian
+            start_cart = sph2cart(rdecra_start)
             # end of the 'arc'
             t_stop = window[1]
+            # position of asteroid at arc end
             radec_stop, _, vmag_stop = self.object.raDecVmag(t_stop.mjd, _jpl_eph, epoch='J2000',
                                                              station=sta_compute_position_GCRS(_station, _eops,
                                                                                                t_stop.mjd),
@@ -848,17 +890,17 @@ class Target(object):
                 tables = []
                 # global viz
                 # print(pointings)
-                if len(pointings) > 50:
-                    print('Moves very fast, will only consider the first 30 pointings')
-                for pi, pointing in enumerate(pointings[:50]):
+                max_pointings = 50
+                if len(pointings) > max_pointings:
+                    print('Moves very fast, will only consider the first {:d} pointings'.format(max_pointings))
+                for pi, pointing in enumerate(pointings[:max_pointings]):
                     print('querying pointing #{:d}'.format(pi+1))
                     # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
                     grid_stars_pointing = viz.query_region(pointing, search_radius * u.rad, catalog=_guide_star_cat)
-                    if len(list(grid_stars_pointing.keys())) == 0:
-                        # no stars found? proceed to next pointing
-                        continue
-                    print('number of stars in this pointing:', len(grid_stars_pointing[_guide_star_cat]))
-                    tables.append(grid_stars_pointing[_guide_star_cat])
+                    if len(list(grid_stars_pointing.keys())) != 0:
+                        print('number of stars in this pointing:', len(grid_stars_pointing[_guide_star_cat]))
+                        tables.append(grid_stars_pointing[_guide_star_cat])
+                    # no stars found? proceed to next pointing
                 print('number of pointings with stars:', len(tables))
                 if len(tables) == 1:
                     grid_stars = tables[0]
@@ -879,6 +921,42 @@ class Target(object):
 
             # window time span
             window_t_span = t_stop - t_start
+
+            # NOTE: asteroids don't move following great circles, and it's a bad idea to
+            # approximate asteroid's motion with a great circle segment
+            # Instead, we will compute distances from each of the grid stars to the asteroid actual positions
+            # and search for minimum over the arc, then do a local fit to find the moment of closest approach
+            # and compute time window and reference position using that.
+
+            ''' alternative approach: compute 'v lob' and using great circle -- comparison '''
+            print(t_start, t_stop, window_t_span)
+            radecs = []
+            radec_dots = []
+            for ii in range(30):
+                ti = t_start + window_t_span*ii/30.0
+                rd, rddot, _ = self.object.raDecVmag(ti.mjd, _jpl_eph, epoch='J2000',
+                                                     station=sta_compute_position_GCRS(_station, _eops, ti.mjd),
+                                                     output_Vmag=True)
+                radecs.append(rd)
+                radec_dots.append(rddot)
+            radecs = np.array(radecs)
+            radec_dots = np.array(radec_dots)
+
+            for star in grid_stars[mag_mask]:
+                radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0  # [rad]
+
+            pntgs = split_great_circle_segment(radec_start_sc, radec_stop_sc, 3.5)
+            print(pntgs)
+            pntgs = np.array([[pt.ra.rad, pt.dec.rad] for pt in pntgs])
+
+            fig = plt.figure('aa')
+            ax = fig.add_subplot(111)
+            ax.plot(radecs[:, 0], radecs[:, 1], '.', c=plt.cm.Blues(0.8))
+            ax.plot(pntgs[:, 0], pntgs[:, 1], '.', c=plt.cm.Greens(0.8))
+            plt.show()
+
+            raw_input()
+
 
             if False:
                 self.plot_field(middle, window_size=window_size,
@@ -910,7 +988,8 @@ class Target(object):
 
             # finally, we rotate the intermediate system around its X axis by angle_stop so that the
             # stop point ends up on the (yet another new) XY plane
-            # print(rotation(start_cart, radec_start, angle_stop), rotation(stop_cart, radec_start, angle_stop))
+            # print(rotation(start_cart, radec_start, angle_stop))
+            # print(rotation(stop_cart, radec_start, angle_stop))
 
             # coordinates of the stop point are now (cos(theta), sin(theta), 0):
             # theta = np.arccos(np.dot(start_cart, stop_cart))
@@ -918,6 +997,12 @@ class Target(object):
 
             lonlat_start = rotate_radec(radec_start, radec_start, angle_stop)
             lonlat_stop = rotate_radec(radec_stop, radec_start, angle_stop)
+            # print(lonlat_start, lonlat_stop)
+            # print(radec_start, radec_stop)
+            # print(derotate_lonlat(lonlat_start, radec_start, angle_stop),
+            #       derotate_lonlat(lonlat_stop, radec_start, angle_stop))
+
+            print('{:d} stars brighter than {:.3f}'.format(len(grid_stars[mag_mask]), _m_lim_gs))
 
             for star in grid_stars[mag_mask]:
                 radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0  # [rad]
@@ -925,16 +1010,19 @@ class Target(object):
                 lonlat = rotate_radec(radec_star, radec_start, angle_stop)
 
                 # astropy distances:
-                # star_sc = SkyCoord(ra=radec_star[0], dec=radec_star[1], unit=(u.rad, u.rad), frame='icrs')
+                star_sc = SkyCoord(ra=radec_star[0], dec=radec_star[1], unit=(u.rad, u.rad), frame='icrs')
                 # print(star['Source'], star_sc.separation(radec_start_sc), star_sc.separation(radec_stop_sc))
 
                 # distance from star to asteroid track is simply the latitude in the rotated CS
                 distance_track = np.abs(lonlat[1])
                 # distance to start of track:
-                distance_start = np.arccos(np.cos(lonlat_start[0] - lonlat[0]) * np.cos(distance_track))
+                distance_start = np.abs(np.arccos(np.cos(lonlat_start[0] - lonlat[0]) * np.cos(distance_track)))
                 # distance to end of track:
-                distance_stop = np.arccos(np.cos(lonlat[0] - lonlat_stop[0]) * np.cos(distance_track))
-                # print(distance_track, distance_start, distance_stop)
+                distance_stop = np.abs(np.arccos(np.cos(lonlat[0] - lonlat_stop[0]) * np.cos(distance_track)))
+                # print(star['Source'], 'distances to track, start, stop:')
+                # print(coord.Angle(distance_track, unit=u.rad).to_string(unit=u.degree),
+                #       coord.Angle(distance_start, unit=u.rad).to_string(unit=u.degree),
+                #       coord.Angle(distance_stop, unit=u.rad).to_string(unit=u.degree))
 
                 # save star in three possible cases:
                 # 1) lon_start <= lon <= lon_stop and distance_track <= radius_rad
@@ -946,23 +1034,81 @@ class Target(object):
                 if lonlat_start[0] <= lonlat[0] <= lonlat_stop[0] and distance_track <= radius_rad:
                     close_enough = True
                     min_distance = distance_track
+                    radec_closest = derotate_lonlat([lonlat[0], 0.0], radec_start, angle_stop)
+                    closest_approach_point = SkyCoord(ra=radec_closest[0], dec=radec_closest[1],
+                                                      unit=(u.rad, u.rad), frame='icrs')
+                    # print('lala: ', min_distance, star_sc.separation(closest_approach_point).rad)
+                    print('closest approach point:', closest_approach_point)
                 elif lonlat[0] > lonlat_stop[0] and distance_stop <= radius_rad:
                     close_enough = True
                     min_distance = distance_stop
+                    closest_approach_point = radec_stop_sc
                 elif lonlat[0] < lonlat_start[0] and distance_start <= radius_rad:
                     close_enough = True
                     min_distance = distance_start
+                    closest_approach_point = radec_start_sc
+                # raw_input()
 
                 if close_enough:
-                    # print('{:s}:'.format(self.object.name), star['Source'], 'is close enough!')
+                    print('{:s}:'.format(self.object.name), star['Source'], 'is close enough!')
+
                     # arc length from closest point to star on star track (extension)
                     # to furthest such that distance to it <= radius_rad:
                     arc = np.arccos(np.cos(radius_rad) / np.cos(distance_track))
                     # print(arc)
+                    delta_t_approach = np.max([0, lonlat[0] / lonlat_stop[0]])
                     delta_t_start = np.max([0, (lonlat[0] - arc) / lonlat_stop[0]])
                     delta_t_stop = np.min([1, (lonlat[0] + arc) / lonlat_stop[0]])
+                    t_approach_star = t_start + delta_t_approach * window_t_span
                     t_start_star = t_start + delta_t_start * window_t_span
                     t_stop_star = t_start + delta_t_stop * window_t_span
+
+                    print(star['Source'], 'distances to track, start, stop:')
+                    # print(distance_track, distance_start, distance_stop)
+                    print(coord.Angle(distance_track, unit=u.rad).to_string(unit=u.degree),
+                          coord.Angle(distance_start, unit=u.rad).to_string(unit=u.degree),
+                          coord.Angle(distance_stop, unit=u.rad).to_string(unit=u.degree))
+
+                    _radec_start, _, _ = self.object.raDecVmag(Time(str(t_start_star), format='iso').mjd,
+                                                               _jpl_eph, epoch='J2000',
+                                                               station=sta_compute_position_GCRS(_station,
+                                                                                                 _eops,
+                                                                                                 Time(str(t_start_star),
+                                                                                                      format='iso').mjd),
+                                                               output_Vmag=True)
+                    _radec_start = np.array(_radec_start)
+                    _radec_start_sc = SkyCoord(ra=_radec_start[0], dec=_radec_start[1], unit=(u.rad, u.rad),
+                                               frame='icrs')
+
+                    _radec_approach, _, _ = self.object.raDecVmag(Time(str(t_approach_star), format='iso').mjd,
+                                                               _jpl_eph, epoch='J2000',
+                                                               station=sta_compute_position_GCRS(_station,
+                                                                                                 _eops,
+                                                                                                 Time(str(t_approach_star),
+                                                                                                      format='iso').mjd),
+                                                               output_Vmag=True)
+                    _radec_approach = np.array(_radec_approach)
+                    _radec_approach_sc = SkyCoord(ra=_radec_approach[0], dec=_radec_approach[1], unit=(u.rad, u.rad),
+                                                  frame='icrs')
+                    print('closest approach point from time considerations:', _radec_approach_sc)
+
+                    # end of the 'arc'
+                    _radec_stop, _, _ = self.object.raDecVmag(Time(str(t_stop_star), format='iso').mjd,
+                                                                     _jpl_eph, epoch='J2000',
+                                                                     station=sta_compute_position_GCRS(_station, _eops,
+                                                                                                       Time(str(
+                                                                                                   t_stop_star),
+                                                                                                   format='iso').mjd),
+                                                                     output_Vmag=True)
+                    _radec_stop = np.array(_radec_stop)
+                    _radec_stop_sc = SkyCoord(ra=_radec_stop[0], dec=_radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
+
+                    print('distances to start, approach, stop')
+                    print(star_sc.separation(_radec_start_sc),
+                          star_sc.separation(_radec_approach_sc),
+                          star_sc.separation(_radec_stop_sc))
+
+                    raw_input()
 
                     # print(delta_t_start, delta_t_stop)
                     # print(t_start_star, t_stop_star)
@@ -978,18 +1124,27 @@ class Target(object):
 
         # keep 5 closest and 5 brightest, plot 'finding charts'
         if len(self.guide_stars) > 0:
+            print('found {:d} suitable guide stars'.format(len(self.guide_stars)))
             self.guide_stars = np.array(self.guide_stars)
 
-            grid_stars_closest = self.guide_stars[self.guide_stars[:, 3].argsort(), :][:5, :]
-            grid_stars_brightest = self.guide_stars[self.guide_stars[:, 2].argsort(), :][:5, :]
-            best_grid_stars = grid_stars_closest
+            dist = self.guide_stars[:, 3]
+            # print(dist)
+            mags = self.guide_stars[:, 2]
+            # print(mags)
+
+            grid_stars_closest = self.guide_stars[dist.argsort(), :][:5, :]
+            # print(grid_stars_closest)
+            grid_stars_brightest = self.guide_stars[mags.argsort(), :][:5, :]
+            # print(grid_stars_brightest)
+            best_grid_stars = grid_stars_brightest
             # print(best_grid_stars.shape)
-            for star in grid_stars_brightest:
-                if star not in best_grid_stars:
+            for star in grid_stars_closest:
+                if star[0] not in best_grid_stars[:, 0]:
                     best_grid_stars = np.append(best_grid_stars, np.expand_dims(star, 0), axis=0)
                     # print(best_grid_stars.shape)
 
             self.guide_stars = best_grid_stars
+            # print(self.guide_stars.shape)
 
             if _plot_field:
                 for si, star in enumerate(self.guide_stars):
@@ -1177,9 +1332,9 @@ class Target(object):
                          facecolor=plt.cm.Oranges(0.3), marker='x', s=50, alpha=0.7, linewidths=3)
 
         # highlight stars bright enough to serve as tip-tilt guide stars:
-        mask_bright = mag_stars >= _highlight_brighter_than_mag
+        mask_bright = mag_stars <= _highlight_brighter_than_mag
         if np.max(mask_bright) == 1:
-            fig.show_markers(grid_stars['RA_ICRS'], grid_stars['DE_ICRS'],
+            fig.show_markers(grid_stars[mask_bright]['RA_ICRS'], grid_stars[mask_bright]['DE_ICRS'],
                              layer='marker_set_2', edgecolor=plt.cm.Oranges(0.9),
                              facecolor=plt.cm.Oranges(0.8), marker='+', s=50, alpha=0.9, linewidths=1)
 
@@ -1535,12 +1690,10 @@ class TargetListAsteroids(object):
         radec = np.array([_target.radec for _target in self.targets])
         # print(radec)
         # tic = _time()
-        coords = SkyCoord(ra=radec[:, 0], dec=radec[:, 1],
-                          unit=(u.rad, u.rad), frame='icrs')
+        coords = SkyCoord(ra=radec[:, 0], dec=radec[:, 1], unit=(u.rad, u.rad), frame='icrs')
         # print(_time() - tic)
         tic = _time()
-        table = observability_table(constraints, self.observatory, coords,
-                                    time_range=night)
+        table = observability_table(constraints, self.observatory, coords, time_range=night)
         print('observability computation took: {:.2f} s'.format(_time() - tic))
         # print(table)
 
@@ -1601,7 +1754,10 @@ class TargetListAsteroids(object):
         sunSet = self.observatory.sun_set_time(astrot[0])
         sunRise = self.observatory.sun_rise_time(astrot[1])
 
-        night = Time([str(sunSet.datetime), str(sunRise.datetime)],
+        # print(sunSet.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f'),
+        # sunRise.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f'))
+        night = Time([sunSet.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f'),
+                      sunRise.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f')],
                      format='iso', scale='utc')
 
         # build time grid for the night to come
@@ -2353,11 +2509,10 @@ if __name__ == '__main__':
     ''' Target list '''
     # date in UTC!!! (for KP, it's the next day if it's still daytime)
     now = datetime.datetime.now(pytz.timezone(timezone))
-    # today = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=1)
-    # date = datetime.datetime(now.year, now.month, now.day) - datetime.timedelta(days=11)
-    for dd in range(0, 2):
-    # for dd in [-18]:
-        date = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=dd)
+
+    for dd in range(0, 1):
+        # date = datetime.datetime(now.year, now.month, now.day) + datetime.timedelta(days=dd)
+        date = datetime.datetime(2017, 2, 14)
         print('running computation for:', date)
 
         # NEA or PHA:
