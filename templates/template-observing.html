@@ -6,13 +6,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <!-- The above 3 meta tags *must* come first in the head; any other head content must come *after* these tags -->
     <meta name="description" content="">
-    <meta name="author" content="">
-    <!--<link rel="icon" href="favicon.ico">-->
+    <meta name="author" content="Dmitry A. Duev">
+    <link rel="icon" type="image/png" href="/static/robot-favicon.png">
 
     <title>Robo-AO Planet Protection</title>
 
     <!-- Bootstrap core CSS -->
     <link rel="stylesheet" href="/static/css/bootstrap.min.css">
+    <link rel="stylesheet" href="/static/css/daterangepicker.css">
 
     <!-- IE10 viewport hack for Surface/desktop Windows 8 bug -->
     <link href="/static/css/ie10-viewport-bug-workaround.css" rel="stylesheet">
@@ -109,9 +110,22 @@
 {# content is streamed date by date from the server #}
 {% if dates %}
     <div class="container">
-        <div class="col-md-12">
+        <div class="col-md-8">
             <h2>
                 Bright asteroids
+            </h2>
+        </div>
+        <div class="col-md-4">
+            <h2>
+                <div class="form-group">
+                    <div class="input-group">
+                        <input type="text" name="daterange" id="daterange" class="form-control"
+                           style="cursor: pointer"/>
+                        <span class="input-group-addon">
+                            <span class="glyphicon glyphicon-calendar"></span>
+                        </span>
+                    </div>
+                </div>
             </h2>
         </div>
     </div>
@@ -270,6 +284,8 @@
 <!-- Placed at the end of the document so the pages load faster -->
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js"></script>
 <script src="/static/js/bootstrap.min.js"></script>
+<script src="/static/js/moment.min.js"></script>
+<script src="/static/js/daterangepicker.js"></script>
 
 <script>
 $(document).ready(function(){
@@ -301,6 +317,66 @@ $(".pop").on("click", function() {
     $('#finding_chart_modal').modal('show');
 });
 </script>
+
+{# daterangepicker #}
+<script type="text/javascript">
+$(function() {
+
+    var start = moment().utc().startOf('day');
+    var end = moment().utc().add(30, 'days').startOf('day');
+
+    function cb(start, end) {
+        $('#daterange').val(start.format('MMMM D, YYYY') + ' - ' + end.format('MMMM D, YYYY'));
+    }
+
+    $('#daterange').daterangepicker({
+        startDate: start,
+        endDate: end,
+        timePicker: true,
+        timePicker24Hour: true,
+        timePickerIncrement: 5,
+        locale: {
+            format: 'MMMM D, YYYY'
+        },
+        ranges: {
+           'Today': [moment().utc().startOf('day'), moment().utc().add(1, 'days').startOf('day')],
+           'Tomorrow': [moment().utc().add(1, 'days').startOf('day'),
+                         moment().utc().add(2, 'days').startOf('day')],
+           'Next 7 Days': [moment().utc().startOf('day'),
+                           moment().utc().add(7, 'days').startOf('day')],
+           'Next 30 Days': [moment().utc().startOf('day'),
+                            moment().utc().add(30, 'days').startOf('day')],
+           'This Month': [moment().utc().startOf('month'),
+                          moment().utc().endOf('month')],
+           'Next Month': [moment().utc().add(1, 'month').startOf('month'),
+                          moment().utc().add(1, 'month').endOf('month')],
+           'Everything': [moment('20151001', 'YYYYMMDD'), moment('20201001', 'YYYYMMDD')]
+        },
+        minDate: moment('20151001', 'YYYYMMDD'),
+        maxDate: moment('20200101', 'YYYYMMDD'),
+        opens: "left"
+    }, cb);
+
+    cb(start, end);
+
+    $('#daterange').on('apply.daterangepicker', function(ev, picker) {
+        var start = picker.startDate.format('YYYYMMDD');
+        var stop = picker.endDate.format('YYYYMMDD');
+        window.location.href = "?start=" + start + "&stop=" + stop;
+    });
+
+});
+</script>
+
+{# propagate date ranges #}
+{% if request.args.get('start') != None and request.args.get('stop') != None %}
+<script>
+    $(document).ready(function() {
+        $('#daterange').data('daterangepicker').setStartDate(moment('{{ request.args.get('start') }}', 'YYYYMMDD'));
+        $('#daterange').data('daterangepicker').setEndDate(moment('{{ request.args.get('stop') }}', 'YYYYMMDD'));
+    });
+</script>
+{% endif %}
 
 </body>
 </html>

@@ -6,6 +6,7 @@ import os
 import json
 import datetime
 import ConfigParser
+import argparse
 import flask
 import inspect
 import traceback
@@ -23,14 +24,14 @@ def daterange(start_date, end_date):
         yield start_date + datetime.timedelta(n)
 
 
-def get_config(config_file='config.ini'):
+def get_config(_config_file='config.ini'):
     """
         load config data
     """
     try:
         abs_path = os.path.dirname(inspect.getfile(inspect.currentframe()))
         _config = ConfigParser.RawConfigParser()
-        _config.read(os.path.join(abs_path, config_file))
+        _config.read(os.path.join(abs_path, _config_file))
         # logger.debug('Successfully read in the config file {:s}'.format(args.config_file))
 
         ''' connect to mongodb database '''
@@ -51,8 +52,19 @@ def get_config(config_file='config.ini'):
 app = flask.Flask(__name__)
 app.secret_key = 'roboaokicksass'
 
+''' Create command line argument parser '''
+parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 description='Data archive for Robo-AO')
+
+parser.add_argument('config_file', metavar='config_file',
+                    action='store', help='path to config file.', type=str)
+
+args = parser.parse_args()
+config_file = args.config_file
+
 ''' get config data '''
-config = get_config(config_file='config.ini')
+# config = get_config(config_file='config.ini')
+config = get_config(_config_file=config_file)
 
 
 @app.route('/data/<path:filename>')
@@ -111,22 +123,20 @@ def root():
     dates = get_dates(start=start, stop=stop)
 
     return flask.Response(stream_template('template-observing.html',
-                                          dates=iter_dates(dates)))
+                                          dates=iter_dates(dates), start=start, stop=stop))
 
 
 def get_dates(start=None, stop=None):
     if start is None:
-        # this is ~when we moved to KP:
-        start = datetime.datetime(2016, 12, 1)
-        # # by default -- last 30 days:
-        # start = datetime.datetime.utcnow() - datetime.timedelta(days=10)
+        # tonight by default:
+        start = datetime.datetime.utcnow()
     else:
         try:
             start = datetime.datetime.strptime(start, '%Y%m%d')
         except Exception as _e:
             print(_e)
-            # start = datetime.datetime.utcnow() - datetime.timedelta(days=10)
-            start = datetime.datetime(2016, 12, 1)
+            start = datetime.datetime.utcnow()
+            # start = datetime.datetime(2016, 12, 1)
 
     if stop is None:
         stop = datetime.datetime.utcnow() + datetime.timedelta(days=30)
