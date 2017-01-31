@@ -94,15 +94,15 @@
 <nav class="navbar navbar-default navbar-fixed-top navbar-blue">
     <div class="container">
         <div class="navbar-header">
-            <button type="button" class="navbar-toggle collapsed"
-                    data-toggle="collapse" data-target="#navbar"
-                    aria-expanded="false" aria-controls="navbar">
-                <span class="sr-only">Toggle navigation</span>
-                <span class="icon-bar"></span>
-                <span class="icon-bar"></span>
-                <span class="icon-bar"></span>
-            </button>
-            <a class="navbar-brand" href="/">Robo-AO planet protection</a>
+{#            <button type="button" class="navbar-toggle collapsed"#}
+{#                    data-toggle="collapse" data-target="#navbar"#}
+{#                    aria-expanded="false" aria-controls="navbar">#}
+{#                <span class="sr-only">Toggle navigation</span>#}
+{#                <span class="icon-bar"></span>#}
+{#                <span class="icon-bar"></span>#}
+{#                <span class="icon-bar"></span>#}
+{#            </button>#}
+            <a class="navbar-brand" href="/">Robo-AO NEO tracking</a>
         </div>
     </div>
 </nav>
@@ -110,141 +110,191 @@
 {# content is streamed date by date from the server #}
 {% if dates %}
     <div class="container">
-        <div class="col-md-8">
-            <h2>
-                Bright asteroids
-            </h2>
-        </div>
-        <div class="col-md-4">
-            <h2>
-                <div class="form-group">
-                    <div class="input-group">
-                        <input type="text" name="daterange" id="daterange" class="form-control"
-                           style="cursor: pointer"/>
-                        <span class="input-group-addon">
-                            <span class="glyphicon glyphicon-calendar"></span>
-                        </span>
+        <div class="row">
+            <div class="col-md-8">
+                <h2>
+                    Bright asteroids:
+                    <div class="btn-group">
+                        <button type="button" class="btn btn-info dropdown-toggle"
+                                data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+                            Toggle class <span class="caret"></span>
+                        </button>
+                        <ul class="dropdown-menu">
+                            <li><a href="#" onclick="toggle_asteroid_class(0)">NEA</a></li>
+                            <li><a href="#" onclick="toggle_asteroid_class(1)">PHA</a></li>
+                            <li><a href="#" onclick="toggle_asteroid_class(2)">DAILY</a></li>
+                            <li><a href="#" onclick="toggle_asteroid_class(3)">TEMPORARY</a></li>
+                        </ul>
                     </div>
-                </div>
-            </h2>
+                </h2>
+            </div>
+            <div class="col-md-4">
+                <h2>
+                    <div class="form-group">
+                        <div class="input-group">
+                            <input type="text" name="daterange" id="daterange" class="form-control"
+                               style="cursor: pointer"/>
+                            <span class="input-group-addon">
+                                <span class="glyphicon glyphicon-calendar"></span>
+                            </span>
+                        </div>
+                    </div>
+                </h2>
+            </div>
         </div>
     </div>
     {% for date, data in dates %}
         {% if None in (date, data) %}
             <div class="container">
-                <div class="col-md-12">
-                    <h3>No data to show</h3>
+                <div class="row">
+                    <div class="col-md-12">
+                        <h3>No data to show</h3>
+                    </div>
                 </div>
             </div>
             <br>
         {% else %}
             <div class="container">
-                <div class="col-md-12">
-                    <h3 style="color: #286090">{{ date[:4]+'/' + date[4:6]+'/' + date[6:] }}</h3>
-                    {% if data != None %}
-                        <table class="table table-hover table-condensed">
-                            <thead style="border-bottom: none;">
-                            <tr>
-                                {% for key in ('name', 'mag', 'mean_epoch_UTC', 'mean_RA', 'mean_Dec',
-                                               'mean_RA_dot', 'mean_Dec_dot', 'observable', 'meridian_crossing',
-                                               'guide_star_id', 'guide_star_RA', 'guide_star_Dec', 'guide_star_mag',
-                                               'guide_star_min_d', 'guide_star_obs_win', 'finding_chart',
-                                               'comment')%}
-                                    <th class="rotate"><div><span>{{ key }}</span></div></th>
+                <div class="row">
+                    <div class="col-md-12">
+                        <h3 style="color: #286090">{{ date[:4]+'/' + date[4:6]+'/' + date[6:] }}</h3>
+
+                        <div class="data-tabs">
+
+                            <!-- Nav tabs -->
+                            <ul class="nav nav-tabs" role="tablist" id="{{ date }}-nav-tabs">
+                                {% set asteroid_classes = data.keys() %}
+                                <li role="presentation" id="{{ date }}-nav-tabs-{{ asteroid_classes[0] }}"
+                                    class="active {{ asteroid_classes[0] }}">
+                                    <a href="#{{ date }}-{{ asteroid_classes[0] }}"
+                                       aria-controls="{{ date }}-{{ asteroid_classes[0] }}"
+                                       role="tab" data-toggle="tab" class="{{ asteroid_classes[0] }}">
+                                        {{ asteroid_classes[0] }}</a>
+                                </li>
+                                {% for asteroid_class in asteroid_classes[1:] %}
+                                    <li role="presentation" id="{{ date }}-nav-tabs-{{ asteroid_class }}"
+                                        class="{{ asteroid_class }}">
+                                    <a href="#{{ date }}-{{ asteroid_class }}"
+                                       aria-controls="{{ date }}-{{ asteroid_class }}"
+                                       role="tab" data-toggle="tab" class="{{ asteroid_class }}">
+                                        {{ asteroid_class }}</a>
+                                </li>
                                 {% endfor %}
-                                <th></th>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {% for object in data %}
-                                {% set num_gs = data[object]['guide_stars'] | length %}
-                                <tr class="clickable-row">
-                                    <td style="border-right: solid 1px #DDDDDD;"
-                                               name="object_name"
-                                            {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ object }}</td>
-                                    {% for key in ('magnitude', 'mean_epoch')%}
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                            name="{{ key }}"
-                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[object][key] }}</td>
-                                    {% endfor %}
-                                    {% for key in ('mean_radec', 'mean_radec_dot')%}
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                            name="{{ key }}"
-                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[object][key][0] }}</td>
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                            name="{{ key }}"
-                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[object][key][1] }}</td>
-                                    {% endfor %}
-                                    {% for key in ('is_observable', 'meridian_crossing')%}
-                                        {% set class = 'success' if data[object][key] == 'true' else 'danger' %}
-                                        <td style="border-right: solid 1px #DDDDDD;" name="{{ key }}"
-                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>
-                                            <span class="label label-{{ class }}">{{ data[object][key] }}</span></td>
-                                    {% endfor %}
-                                    {% if data[object]['guide_stars'] | length > 0 %}
-                                        {% set guide_star = data[object]['guide_stars'][0] %}
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                                   name="gs_id">{{ guide_star['id'] }}</td>
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                            name="gs_ra">{{ guide_star['radec'][0] }}</td>
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                            name="gs_dec">{{ guide_star['radec'][1] }}</td>
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                                   name="gs_id">{{ guide_star['magnitude'] }}</td>
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                                   name="gs_id">{{ guide_star['min_separation'] }}</td>
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                                   name="gs_id">{{ guide_star['obs_window'] }}</td>
-                                        <td style="border-right: solid 1px #DDDDDD;"
-                                                   name="gs_id">
-                                                    <img src="data/{{ date }}/{{ guide_star['finding_chart'] }}"
-                                                     alt="{{ aux_key }}" class="img-responsive pop"
-                                                     style="cursor:pointer; cursor: hand; width:200px;">
-{#                                                    <span src="data/{{ date }}/{{ guide_star['finding_chart'] }}"#}
-{#                                                       class="pop" style="cursor:pointer; cursor: hand;">#}
-{#                                                        show</span>#}
-                                        </td>
-                                    {% else %}
-                                        <td style="border-right: solid 1px #DDDDDD;" colspan="7"
-                                            name="guide_stars">
-                                            <span class="label label-danger">None</span>
-                                        </td>
-                                    {% endif %}
-                                    <td style="border-right: solid 1px #DDDDDD;"
-                                            name="comment" {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>
-                                        {{ data[object]['comment'] }}</td>
-                                </tr>
-                                    {% if data[object]['guide_stars'] | length > 1 %}
-                                        {% for guide_star in data[object]['guide_stars'][1:] %}
-                                            <tr class="clickable-row">
-                                                <td style="border-right: solid 1px #DDDDDD;"
-                                                       name="gs_id">{{ guide_star['id'] }}</td>
-                                                <td style="border-right: solid 1px #DDDDDD;"
-                                                    name="gs_ra">{{ guide_star['radec'][0] }}</td>
-                                                <td style="border-right: solid 1px #DDDDDD;"
-                                                    name="gs_dec">{{ guide_star['radec'][1] }}</td>
-                                                <td style="border-right: solid 1px #DDDDDD;"
-                                                           name="gs_id">{{ guide_star['magnitude'] }}</td>
-                                                <td style="border-right: solid 1px #DDDDDD;"
-                                                           name="gs_id">{{ guide_star['min_separation'] }}</td>
-                                                <td style="border-right: solid 1px #DDDDDD;"
-                                                           name="gs_id">{{ guide_star['obs_window'] }}</td>
-                                                <td style="border-right: solid 1px #DDDDDD;"
-                                                           name="gs_id">
-                                                    <img src="data/{{ date }}/{{ guide_star['finding_chart'] }}"
-                                                     alt="{{ aux_key }}" class="img-responsive pop"
-                                                     style="cursor:pointer; cursor: hand; width:200px;">
-{#                                                    <span src="data/{{ date }}/{{ guide_star['finding_chart'] }}"#}
-{#                                                       class="pop" style="cursor:pointer; cursor: hand;">#}
-{#                                                        show</span>#}
-                                                </td>
+                            </ul>
+
+                            <!-- Tab panes -->
+                            <div class="tab-content">
+                                {% for asteroid_class in asteroid_classes %}
+                                    <div role="tabpanel" class="tab-pane{% if asteroid_class == asteroid_classes[0] %} active{% endif %}"
+                                         id="{{ date }}-{{ asteroid_class }}">
+                                        <br>
+                                        <table class="table table-hover table-condensed">
+                                            <thead style="border-bottom: none;">
+                                            <tr>
+                                                {% for key in ('name', 'mag', 'mean_epoch_UTC', 'mean_RA', 'mean_Dec',
+                                                               'mean_RA_dot', 'mean_Dec_dot', 'observable', 'meridian_crossing',
+                                                               'guide_star_id', 'guide_star_RA', 'guide_star_Dec', 'guide_star_mag',
+                                                               'guide_star_min_d', 'guide_star_obs_win', 'finding_chart',
+                                                               'comment')%}
+                                                    <th class="rotate"><div><span>{{ key }}</span></div></th>
+                                                {% endfor %}
+                                                <th></th>
                                             </tr>
-                                        {% endfor %}
-                                    {% endif %}
-                            {% endfor %}
-                            </tbody>
-                        </table>
-                    {% endif %}
+                                            </thead>
+                                            <tbody>
+                                            {% for object in data[asteroid_class] %}
+                                                {% set num_gs = data[asteroid_class][object]['guide_stars'] | length %}
+                                                <tr class="clickable-row">
+                                                    <td style="border-right: solid 1px #DDDDDD;"
+                                                               name="object_name"
+                                                            {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ object }}</td>
+                                                    {% for key in ('magnitude', 'mean_epoch')%}
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                            name="{{ key }}"
+                                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[asteroid_class][object][key] }}</td>
+                                                    {% endfor %}
+                                                    {% for key in ('mean_radec', 'mean_radec_dot')%}
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                            name="{{ key }}"
+                                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[asteroid_class][object][key][0] }}</td>
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                            name="{{ key }}"
+                                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[asteroid_class][object][key][1] }}</td>
+                                                    {% endfor %}
+                                                    {% for key in ('is_observable', 'meridian_crossing')%}
+                                                        {% set class = 'success' if data[asteroid_class][object][key] == 'true' else 'danger' %}
+                                                        <td style="border-right: solid 1px #DDDDDD;" name="{{ key }}"
+                                                        {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>
+                                                            <span class="label label-{{ class }}">{{ data[asteroid_class][object][key] }}</span></td>
+                                                    {% endfor %}
+                                                    {% if data[asteroid_class][object]['guide_stars'] | length > 0 %}
+                                                        {% set guide_star = data[asteroid_class][object]['guide_stars'][0] %}
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                                   name="gs_id">{{ guide_star['id'] }}</td>
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                            name="gs_ra">{{ guide_star['radec'][0] }}</td>
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                            name="gs_dec">{{ guide_star['radec'][1] }}</td>
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                                   name="gs_id">{{ guide_star['magnitude'] }}</td>
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                                   name="gs_id">{{ guide_star['min_separation'] }}</td>
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                                   name="gs_id">{{ guide_star['obs_window'] }}</td>
+                                                        <td style="border-right: solid 1px #DDDDDD;"
+                                                                   name="gs_id">
+                                                                    <img src="data/{{ date }}/{{ asteroid_class }}/{{ guide_star['finding_chart'] }}"
+                                                                     alt="{{ aux_key }}" class="img-responsive pop"
+                                                                     style="cursor:pointer; cursor: hand; width:200px;">
+                {#                                                    <span src="data/{{ date }}/{{ guide_star['finding_chart'] }}"#}
+                {#                                                       class="pop" style="cursor:pointer; cursor: hand;">#}
+                {#                                                        show</span>#}
+                                                        </td>
+                                                    {% else %}
+                                                        <td style="border-right: solid 1px #DDDDDD;" colspan="7"
+                                                            name="guide_stars">
+                                                            <span class="label label-danger">None</span>
+                                                        </td>
+                                                    {% endif %}
+                                                    <td style="border-right: solid 1px #DDDDDD;"
+                                                            name="comment" {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>
+                                                        {{ data[asteroid_class][object]['comment'] }}</td>
+                                                </tr>
+                                                    {% if data[asteroid_class][object]['guide_stars'] | length > 1 %}
+                                                        {% for guide_star in data[asteroid_class][object]['guide_stars'][1:] %}
+                                                            <tr class="clickable-row">
+                                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                                       name="gs_id">{{ guide_star['id'] }}</td>
+                                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                                    name="gs_ra">{{ guide_star['radec'][0] }}</td>
+                                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                                    name="gs_dec">{{ guide_star['radec'][1] }}</td>
+                                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                                           name="gs_id">{{ guide_star['magnitude'] }}</td>
+                                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                                           name="gs_id">{{ guide_star['min_separation'] }}</td>
+                                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                                           name="gs_id">{{ guide_star['obs_window'] }}</td>
+                                                                <td style="border-right: solid 1px #DDDDDD;"
+                                                                           name="gs_id">
+                                                                    <img src="data/{{ date }}/{{ asteroid_class }}/{{ guide_star['finding_chart'] }}"
+                                                                     alt="{{ aux_key }}" class="img-responsive pop"
+                                                                     style="cursor:pointer; cursor: hand; width:200px;">
+                {#                                                    <span src="data/{{ date }}/{{ guide_star['finding_chart'] }}"#}
+                {#                                                       class="pop" style="cursor:pointer; cursor: hand;">#}
+                {#                                                        show</span>#}
+                                                                </td>
+                                                            </tr>
+                                                        {% endfor %}
+                                                    {% endif %}
+                                            {% endfor %}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         {% endif %}
@@ -288,27 +338,60 @@
 <script src="/static/js/daterangepicker.js"></script>
 
 <script>
-$(document).ready(function(){
-    $(window).scroll(function () {
-        if ($(this).scrollTop() > 50) {
-            $('#back-to-top').fadeIn();
-        }
-        else {
-            $('#back-to-top').fadeOut();
-        }
-    });
-    // scroll body to 0px on click
-    $('#back-to-top').click(function () {
-        $('#back-to-top').tooltip('hide');
-        $('body,html').animate({
-            scrollTop: 0
-        }, 600);
-        return false;
+    // for AJAX requests [absolute website's uri]:
+    $SCRIPT_ROOT = {{ request.script_root|tojson|safe }};
+
+    // switch tabs
+    $(document).ready(function() {
+        $('.data-tabs li a').click(function (e) {
+            e.preventDefault();
+            $(this).tab('show')
+        });
     });
 
-    $('#back-to-top').tooltip('show');
+    // switch tabs
+    function toggle_asteroid_class(tabn) {
+        switch (tabn) {
+            case 0:
+                $('.nea a').tab('show');
+                break;
+            case 1:
+                $('.pha a').tab('show');
+                break;
+            case 2:
+                $('.daily a').tab('show');
+                break;
+            case 3:
+                $('.temporary a').tab('show');
+                break;
+        }
+{#        var arr = $("[id$=-nav-tabs]");#}
+{#        for (var i=0; i<arr.length; i++) {#}
+{#            $('#' + arr[i].id + ' li:eq(' + tabn + ') a').tab('show');#}
+{#        }#}
+    }
 
-});
+    $(document).ready(function(){
+        $(window).scroll(function () {
+            if ($(this).scrollTop() > 50) {
+                $('#back-to-top').fadeIn();
+            }
+            else {
+                $('#back-to-top').fadeOut();
+            }
+        });
+        // scroll body to 0px on click
+        $('#back-to-top').click(function () {
+            $('#back-to-top').tooltip('hide');
+            $('body,html').animate({
+                scrollTop: 0
+            }, 600);
+            return false;
+        });
+
+        $('#back-to-top').tooltip('show');
+
+    });
 </script>
 
 <script>
@@ -362,7 +445,12 @@ $(function() {
     $('#daterange').on('apply.daterangepicker', function(ev, picker) {
         var start = picker.startDate.format('YYYYMMDD');
         var stop = picker.endDate.format('YYYYMMDD');
-        window.location.href = "?start=" + start + "&stop=" + stop;
+        {% if request.args.get('asteroid_class') == None %}
+            window.location.href = "?start=" + start + "&stop=" + stop;
+        {% else %}
+            window.location.href = "?asteroid_class=" + "{{ request.args.get('asteroid_class') }}" +
+                    "&start=" + start + "&stop=" + stop;
+        {% endif %}
     });
 
 });

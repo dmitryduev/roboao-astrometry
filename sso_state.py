@@ -797,7 +797,8 @@ if __name__ == '__main__':
         # JPL:
         # f_database = os.path.join(path_to_database, 'ELEMENTS.NUMBR')
         # MPC:
-        f_database = os.path.join(path_to_database, 'MPCORB.dat')
+        # f_database = os.path.join(path_to_database, 'MPCORB.dat')
+        f_database = os.path.join(path_to_database, 'DAILY.DAT')
 
         try:
             # asteroid = asteroid_data_load(_f_database=f_database, asteroid_name=name)

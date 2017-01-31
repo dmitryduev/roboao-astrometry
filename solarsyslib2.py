@@ -2449,8 +2449,23 @@ if __name__ == '__main__':
     parser.add_argument('config_file', metavar='config_file',
                         action='store', help='path to config file.', type=str)
 
+    parser.add_argument('--asteroid_class', metavar='asteroid_class', action='store', dest='asteroid_class',
+                        help='asteroid class: nea, pha, daily, temporary', type=str, default='pha')
+
     args = parser.parse_args()
     config_file = args.config_file
+    asteroid_class = args.asteroid_class
+
+    if asteroid_class == 'pha':
+        asteroid_database_file = 'PHA.txt'
+    elif asteroid_class == 'nea':
+        asteroid_database_file = 'NEA.txt'
+    elif asteroid_class == 'daily':
+        asteroid_database_file = 'DAILY.DAT'
+    else:
+        print('could not recognize asteroid class, falling back to PHA')
+        asteroid_class = 'pha'
+        asteroid_database_file = 'PHA.txt'
 
     # load config data
     abs_path = os.path.dirname(inspect.getfile(inspect.currentframe()))
@@ -2514,18 +2529,18 @@ if __name__ == '__main__':
     ''' Target list '''
     # date in UTC!!! (for KP, it's the next day if it's still daytime)
     # now = datetime.datetime.now(pytz.timezone(timezone))
-    # date0 = datetime.datetime.utcnow()
-    date0 = datetime.datetime(2017, 6, 16)
+    date0 = datetime.datetime.utcnow()
+    # date0 = datetime.datetime(2017, 6, 30)
 
     for dd in range(0, 30):
     # for dd in range(0, 1):
         date = datetime.datetime(date0.year, date0.month, date0.day) + datetime.timedelta(days=dd)
-        # date = datetime.datetime(2017, 2, 24)
+        # date = datetime.datetime(2017, 1, 30)
         print('\nrunning computation for:', date)
         print('\nstarted at:', datetime.datetime.now(pytz.timezone(timezone)))
 
         # NEA or PHA:
-        tl = TargetListAsteroids(f_inp, database_source='mpc', database_file='PHA.txt',
+        tl = TargetListAsteroids(f_inp, database_source='mpc', database_file=asteroid_database_file,
                                  _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, _date=date)
         # get all bright targets given m_lim
         mask = None
@@ -2535,7 +2550,7 @@ if __name__ == '__main__':
         # get observing windows
         tl.get_observing_windows(date)
         # get guide stars
-        path_nightly_date = os.path.join(path_nightly, date.strftime('%Y%m%d'))
+        path_nightly_date = os.path.join(path_nightly, date.strftime('%Y%m%d'), asteroid_class)
         tl.get_guide_stars(_guide_star_cat=guide_star_cat, _radius=radius, _margin=margin, _m_lim_gs=m_lim_gs,
                            _plot_field=plot_field, _psf_fits=psf_fits, _display_plot=display_plot,
                            _save_plot=save_plot, _path_nightly_date=path_nightly_date, parallel=False)

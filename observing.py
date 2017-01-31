@@ -149,19 +149,27 @@ def get_dates(start=None, stop=None):
 
     dates = OrderedDict()
 
+    asteroid_classes = ['nea', 'pha', 'daily', 'temporary']
+
     for date in daterange(start, stop):
         date_str = date.strftime('%Y%m%d')
-        # load JSON file with the date's data
-        f_json_sci = os.path.join(config['path_nightly'], '{:s}'.format(date_str), 'bright_objects.json')
 
-        if os.path.exists(f_json_sci):
-            try:
-                with open(f_json_sci) as fjson_sci:
-                    data = json.load(fjson_sci, object_pairs_hook=OrderedDict)
-                    data = OrderedDict(data)
-                    dates[date_str] = data
-            except Exception as e:
-                print(e)
+        for asteroid_class in asteroid_classes:
+            # load JSON file with the date's data
+            f_json_sci = os.path.join(config['path_nightly'], '{:s}'.format(date_str),
+                                      asteroid_class, 'bright_objects.json')
+
+            if os.path.exists(f_json_sci):
+                # init dict if not there yet:
+                if date_str not in dates:
+                    dates[date_str] = OrderedDict()
+                try:
+                    with open(f_json_sci) as fjson_sci:
+                        data = json.load(fjson_sci, object_pairs_hook=OrderedDict)
+                        data = OrderedDict(data)
+                        dates[date_str][asteroid_class] = data
+                except Exception as e:
+                    print(e)
 
     return dates
 
