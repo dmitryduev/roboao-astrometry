@@ -10,15 +10,12 @@ import inspect
 from collections import OrderedDict
 from pypride.vintflib import pleph, lagint
 from pypride.classes import inp_set, constants
-from pypride.vintlib import eop_update, internet_on, load_cats, mjuliandate, taitime, eop_iers, t_eph, ter2cel
+from pypride.vintlib import eop_update, internet_on, cel2ter00, mjuliandate, taitime, eop_iers, t_eph, nsec
 from pypride.vintlib import sph2cart, cart2sph, iau_PNM00A
 from pypride.vintlib import factorise, aber_source, R_123, iau_RX, iau_RY, iau_RZ
+from pypride.vintlib import memoize
 from astroplan import Observer as Observer_astroplan
-# from astroplan import FixedTarget
-from astroplan import observability_table  # , is_observable, is_always_observable
-# from astroplan.plots import plot_sky
-from astroplan import time_grid_from_range
-from astroplan import AtNightConstraint, AltitudeConstraint
+
 from astropy.utils.data import clear_download_cache
 from astropy.coordinates import SkyCoord
 import astropy.coordinates as coord
@@ -64,6 +61,62 @@ with suspend_cache(Vizier):
     viz = Vizier()
     viz.ROW_LIMIT = -1
     viz.TIMEOUT = 30
+
+
+def GTRS_to_GCRS(date_utc, eop_int, dTAIdCT=1.0, mode='der1'):
+    """
+    Compute celestial-to-terrestrial matrix for a given UTC date/time
+
+    mode='der' - calculate derivatives
+    mode='der1' - calculate only first derivative
+    mode='noDer' - do not calculate derivatives
+    """
+    if mode == 'der':
+        r2000 = np.zeros((3, 3, 3))
+    elif mode == 'der1':
+        r2000 = np.zeros((3, 3, 2))
+    elif mode == 'noDer':
+        r2000 = np.zeros((3, 3))
+    else:
+        r2000 = np.zeros((3, 3))
+
+    sec = datetime.timedelta(seconds=1)
+    # following IAU 2000A:
+    cel2ter = cel2ter00(date_utc, eop_int)
+    # numerically calculate derivatives:
+    if mode == 'der':
+        cel2ter_m2 = cel2ter00(date_utc - 2 * sec, eop_int)  # -2s TAI
+        cel2ter_m1 = cel2ter00(date_utc - sec, eop_int)  # -1s TAI
+        cel2ter_p1 = cel2ter00(date_utc + sec, eop_int)  # +1s TAI
+        cel2ter_p2 = cel2ter00(date_utc + 2 * sec, eop_int)  # +2s TAI
+    elif mode == 'der1':
+        cel2ter_m1 = cel2ter00(date_utc - sec, eop_int)  # -1s TAI
+        cel2ter_p1 = cel2ter00(date_utc + sec, eop_int)  # +1s TAI
+    else:
+        cel2ter_m1 = np.zeros((3, 3))
+        cel2ter_p1 = np.zeros((3, 3))
+        cel2ter_m2 = np.zeros((3, 3))
+        cel2ter_p2 = np.zeros((3, 3))
+
+    if mode == 'der':
+        # transpose it to get terrestrial-to-celestial matrix and its CT derivative
+        r2000[:, :, 0] = cel2ter.T
+        # (dr/dTAI)*(dTAI/dCT):
+        r2000[:, :, 1] = dTAIdCT * (cel2ter_p1.T - cel2ter_m1.T) / 2.0
+        # (dv/dTAI)*(dTAI/dCT):
+        r2000[:, :, 2] = dTAIdCT * (cel2ter_p2.T -
+                                    2.0 * cel2ter.T + cel2ter_m2.T) / 4.0
+    elif mode == 'der1':
+        # transpose it to get terrestrial-to-celestial matrix and its CT derivative
+        r2000[:, :, 0] = cel2ter.T
+        # (dr/dTAI)*(dTAI/dCT):
+        r2000[:, :, 1] = dTAIdCT * (cel2ter_p1.T - cel2ter_m1.T) / 2.0
+    elif mode == 'noDer':
+        r2000 = cel2ter.T
+    else:
+        raise Exception('unrecognised mode')
+
+    return r2000
 
 
 class Site(object):
@@ -643,26 +696,38 @@ def _target_is_vector(target):
         return False
 
 
-def target_list_all_helper(args):
-    """ Helper function to run asteroid computation in parallel
-
+def target_list_helper(args):
+    """
+        Helper function to run target list computation in parallel
     :param args:
     :return:
     """
-    targlist, asteroid, mjd, epoch, output_Vmag = args
-    radec, radec_rate, Vmag = targlist.getObsParams(asteroid, mjd, epoch=epoch, output_Vmag=output_Vmag)
-    return [radec, radec_rate, Vmag]
+    try:
+        targlist, asteroid, mjds, _epoch, _output_Vmag, night_grid, _twilight, _fraction = args
 
+        # target can move fast, so compute radec/dots on a grid for the whole night
+        radecs, radec_dots, Vmags = [], [], []
+        for mjd in mjds:
+            radec, radec_dot, Vmag = targlist.get_obs_params(asteroid, mjd, _epoch, _output_Vmag)
+            radecs.append(radec)
+            radec_dots.append(radec_dot)
+            Vmags.append(Vmag)
+        radecs = np.array(radecs)
+        radec_dots = np.array(radec_dots)
+        Vmags = np.array(Vmags)
 
-def hour_angle_limit_helper(args):
-    """ Helper function to run hour angle limit computation in parallel
-
-    :param args:
-    :return:
-    """
-    targlist, radec, night = args
-    meridian_transit, t_azel = targlist.get_hour_angle_limit(night, radec[0], radec[1], N=40)
-    return [meridian_transit, t_azel]
+        # skip if too dim
+        if np.min(Vmags) <= targlist.m_lim:
+            observable, meridian_transit, azels = targlist.observability(night_grid, radecs, Vmags,
+                                                                         twilight=_twilight, fraction=_fraction)
+            # print(asteroid['name'], observable, meridian_transit)
+            return [AsteroidDatabase.init_asteroid(asteroid), observable, meridian_transit,
+                    radecs, radec_dots, azels, Vmags]
+        else:
+            return None
+    except Exception as e:
+        print(e)
+        return None
 
 
 # overload target meridian transit
@@ -723,9 +788,27 @@ class Observer(Observer_astroplan):
                     return next_event
 
 
-def load_eop(_inp, _date, station_name='KP-VLBA'):
-    # load cats
-    _, _, eops = load_cats(_inp, 'DUMMY', 'S', [station_name], _date)
+def load_eops(_cat_eop, _date):
+
+    # get the relevant eop entries from the catalog:
+    with open(_cat_eop, 'r') as fc:
+        fc_lines = fc.readlines()
+    mjd_start = mjuliandate(_date.year, _date.month, _date.day)
+    eops = np.zeros((7, 7))  # +/- 3 days
+    for jj, line in enumerate(fc_lines):
+        if line[0] not in (' ', '*'):
+            entry = [float(x) for x in line.split()]
+            if len(entry) > 0 and entry[3] == np.floor(mjd_start) - 3:
+                for kk in range(7):
+                    eops[kk, 0] = entry[3]  # mjd
+                    eops[kk, 1] = entry[6]  # UT1-UTC
+                    eops[kk, 2] = entry[6] - nsec(entry[3])  # UT1 - TAI
+                    eops[kk, 3] = entry[4]  # x_p
+                    eops[kk, 4] = entry[5]  # y_p
+                    eops[kk, 5] = entry[8]  # dX
+                    eops[kk, 6] = entry[9]  # dY
+                    entry = [float(x) for x in fc_lines[jj + kk + 1].split()]
+                break  # exit loop
 
     return eops
 
@@ -737,13 +820,11 @@ class Target(object):
     def __init__(self, _object):
         self.object = _object
         # position at the middle of the night:
-        self.epoch = None
-        self.radec = None
-        self.radec_dot = None
-        self.mag = None
+        self.mean_position = {'epoch': None, 'radec': None, 'radec_dot': None, 'mag': None}
+        # this is to keep [time_grid ra dec ra_dot dec_dot az el Vmag]:
+        self.ephemeris = None
         self.meridian_crossing = None
         self.is_observable = None
-        self.t_el = None
         self.observability_windows = None
         self.guide_stars = None
 
@@ -752,14 +833,15 @@ class Target(object):
             Print it out nicely
         """
         out_str = '<<Target object: {:s} '.format(str(self.object))
-        if self.epoch is not None:
-            out_str += '\n epoch: {:s}'.format(str(self.epoch))
-        if self.mag is not None:
-            out_str += '\n magnitude: {:.3f}'.format(self.mag)
-        if self.radec is not None:
-            out_str += '\n ra: {:.10f} rad, dec: {:.10f} rad'.format(*self.radec)
-        if self.radec_dot is not None:
-            out_str += '\n ra_dot: {:.3f} arcsec/sec, dec_dot: {:.3f} arcsec/sec'.format(*self.radec_dot)
+        if self.mean_position['epoch'] is not None:
+            out_str += '\n mean epoch: {:s}'.format(str(self.mean_position['epoch']))
+        if self.mean_position['mag'] is not None:
+            out_str += '\n magnitude: {:.3f}'.format(self.mean_position['mag'])
+        if self.mean_position['radec'] is not None:
+            out_str += '\n ra: {:.10f} rad, dec: {:.10f} rad'.format(*self.mean_position['radec'])
+        if self.mean_position['radec_dot'] is not None:
+            out_str += '\n ra_dot: {:.3f} arcsec/sec, dec_dot: {:.3f} arcsec/sec'.format(
+                *self.mean_position['radec_dot'])
         if self.meridian_crossing is not None:
             out_str += '\n meridian crossing: {:s}'.format(str(self.meridian_crossing))
         if self.is_observable is not None:
@@ -777,20 +859,32 @@ class Target(object):
             to be jsonified
         :return:
         """
+        # raise NotImplementedError
+        if self.ephemeris is None:
+            raise Exception('compute ephemeris first, aborting.')
+
+        mean_epoch = np.mean([ei.jyear for ei in self.ephemeris[:, 0]])
+        mean_ra = np.mean(self.ephemeris[:, 1])
+        mean_dec = np.mean(self.ephemeris[:, 2])
+        mean_ra_dot = np.mean(self.ephemeris[:, 3])
+        mean_dec_dot = np.mean(self.ephemeris[:, 4])
+        mean_mag = np.mean(self.ephemeris[:, -1])
+
         # mean_epoch_str = self.epoch.datetime.strftime('%Y%m%d_%H%M%S.%f')
-        mean_epoch_str = '{:.11f}'.format(self.epoch.jyear)
-        radec = [hms(self.radec[0]), dms(self.radec[1])]
+        mean_epoch_str = '{:.11f}'.format(mean_epoch)
+        radec = [hms(mean_ra), dms(mean_dec)]
         ra_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(*radec[0])
         if radec[1][0] >= 0:
             dec_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
         else:
             dec_str = '{:03.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
+
         out_dict = OrderedDict([['name', self.object.name],
-                                ['magnitude', '{:.3f}'.format(self.mag)],
+                                ['mean_magnitude', '{:.3f}'.format(mean_mag)],
                                 ['mean_epoch', mean_epoch_str],
                                 ['mean_radec', [ra_str, dec_str]],
-                                ['mean_radec_dot', ['{:.5f}'.format(self.radec_dot[0]),
-                                                    '{:.5f}'.format(self.radec_dot[1])]],
+                                ['mean_radec_dot', ['{:.5f}'.format(mean_ra_dot),
+                                                    '{:.5f}'.format(mean_dec_dot)]],
                                 ['meridian_crossing', str(self.meridian_crossing).lower()],
                                 ['is_observable', str(self.is_observable).lower()],
                                 ['guide_stars', []]
@@ -805,6 +899,7 @@ class Target(object):
                     dec_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
                 else:
                     dec_str = '{:03.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
+
                 out_dict['guide_stars'].append(OrderedDict([['id', star[0]],
                                                             ['radec', [ra_str, dec_str]],
                                                             ['magnitude', '{:.3f}'.format(float(star[2]))],
@@ -814,33 +909,28 @@ class Target(object):
                                                               star[4][1].datetime.strftime('%Y%m%d_%H%M%S.%f')]],
                                                             ['finding_chart', star[5]]
                                                             ]))
+
         return '_'.join(out_dict['name'].split(' ')), out_dict
 
-    def set_epoch(self, _epoch):
+    def set_mean_position(self, _epoch, _radec, _radec_dot=None, _mag=None):
         """
             Position at the middle of the night
         :param _epoch:
+        :param _radec:
+        :param _radec_dot:
+        :param _mag:
         :return:
         """
-        self.epoch = _epoch
-        # reset everything else if epoch is changed
-        self.radec = None
-        self.radec_dot = None
-        self.mag = None
-        self.meridian_crossing = None
-        self.is_observable = None
-        self.t_el = None
-        self.observability_windows = None
-        self.guide_stars = None
-
-    def set_radec(self, _radec):
-        self.radec = _radec
-
-    def set_radec_dot(self, _radec_dot):
-        self.radec_dot = _radec_dot
-
-    def set_mag(self, _mag):
-        self.mag = _mag
+        self.mean_position['epoch'] = _epoch
+        self.mean_position['radec'] = _radec
+        self.mean_position['radec_dot'] = _radec_dot
+        self.mean_position['mag'] = _mag
+        # # reset everything else if mean epoch is changed
+        # self.meridian_crossing = None
+        # self.is_observable = None
+        # self.ephemeris = None
+        # self.observability_windows = None
+        # self.guide_stars = None
 
     def set_meridian_crossing(self, _meridian_crossing):
         self.meridian_crossing = _meridian_crossing
@@ -848,29 +938,25 @@ class Target(object):
     def set_is_observable(self, _is_observable):
         self.is_observable = _is_observable
 
-    def set_t_el(self, _t_el):
-        self.t_el = _t_el
+    def set_ephemeris(self, _ephemeris):
+        self.ephemeris = _ephemeris
 
     def set_observability_windows(self, night, _elv_lim=45.0):
 
-        # get elv vs time:
-        t_el = np.array(self.t_el)
-        # print(t_el)
-
         # time grid within [0, 1] for interpolation:
-        t = [datetime.datetime.strptime(ti, '%Y-%m-%d %H:%M:%S.%f') for ti in t_el[:, 0]]
+        t = [ti.datetime for ti in self.ephemeris[:, 0]]
         t0 = t[0]
         t = np.array([(ti - t0).total_seconds() for ti in t])
         t /= t[-1]
 
         # interpolate to a denser grid to estimate periods when elv >= min_elv more precisely
-        elv = map(float, t_el[:, 1])
+        elv = map(float, self.ephemeris[:, -2])
         N_dense = 200
         t_dense = np.linspace(0, 1, N_dense)
         dense, _ = lagint(3, t, elv, t_dense)
 
-        t_0 = Time(t_el[0, 0], format='iso')
-        t_e = Time(t_el[-1, 0], format='iso')
+        t_0 = self.ephemeris[0, 0]
+        t_e = self.ephemeris[-1, 0]
         dt = t_e - t_0
 
         scans = []
@@ -879,7 +965,7 @@ class Target(object):
         for t_d, el in zip(t_dense, dense):
             # print(t_d, el)
             # above elevation cut-off and the Sun is down?
-            if el >= _elv_lim and night[0] <= t_0 + t_d * dt <= night[1]:
+            if el >= _elv_lim*np.pi/180.0 and night[0] <= t_0 + t_d * dt <= night[1]:
                 scan.append(t_d)
                 # print('appended ', t_d, ' for ', el)
             else:
@@ -898,10 +984,8 @@ class Target(object):
         self.observability_windows = scans
 
     def set_guide_stars(self, _jpl_eph, _guide_star_cat=u'I/337/gaia', _station=None,
-                        _radius=30.0, _margin=30.0, _m_lim_gs=16.0, _plot_field=False,
-                        _model_psf=None, _display_plot=False, _save_plot=False,
-                        _path_nightly_date='./', _inp=None):
-        """ Get guide stars within radius arcseconds for each observability window.
+                        _radius=30.0, _margin=30.0, _m_lim_gs=16.0, _cat_eop=None):
+        """ Get guide stars within radius arc seconds for each observability window.
 
         :param _jpl_eph:
         :param _guide_star_cat:
@@ -914,17 +998,17 @@ class Target(object):
         :param _display_plot:
         :param _save_plot:
         :param _path_nightly_date:
-        :param _inp:
+        :param _cat_eop:
         :return:
         """
         global viz
 
         if self.observability_windows is None:
             print('compute observability windows first before looking for guide stars')
-            return
+            return False
         elif len(self.observability_windows) == 0 or not self.is_observable:
             print('target {:s} not observable'.format(self.object.name))
-            return
+            return False
         else:
             print('target {:s} observable:'.format(self.object.name))
             # init list to keep guide stars
@@ -938,7 +1022,8 @@ class Target(object):
             t_start = window[0]
             # position of asteroid at arc start
             radec_start, _, vmag_start = self.object.raDecVmag(t_start.mjd, _jpl_eph, epoch='J2000',
-                                                               station=_station, output_Vmag=True, _inp=_inp)
+                                                               station=_station, output_Vmag=True,
+                                                               _cat_eop=_cat_eop)
             radec_start = np.array(radec_start)
             radec_start_sc = SkyCoord(ra=radec_start[0], dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs')
             rdecra_start = np.hstack([1.0, radec_start[::-1]])
@@ -948,7 +1033,8 @@ class Target(object):
             t_stop = window[1]
             # position of asteroid at arc end
             radec_stop, _, vmag_stop = self.object.raDecVmag(t_stop.mjd, _jpl_eph, epoch='J2000',
-                                                             station=_station, output_Vmag=True, _inp=_inp)
+                                                             station=_station, output_Vmag=True,
+                                                             _cat_eop=_cat_eop)
             radec_stop = np.array(radec_stop)
             radec_stop_sc = SkyCoord(ra=radec_stop[0], dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
             rdecra_stop = np.hstack([1.0, radec_stop[::-1]])
@@ -978,7 +1064,8 @@ class Target(object):
             for ii in range(n_positions):
                 ti = t_start + t_step*ii
                 rd, rddot, _ = self.object.raDecVmag(ti.mjd, _jpl_eph, epoch='J2000',
-                                                     station=_station, output_Vmag=False, _inp=_inp)
+                                                     station=_station, output_Vmag=False,
+                                                     _cat_eop=_cat_eop)
                 radecs.append(rd)
                 radec_dots.append(rddot)
             # print(radecs)
@@ -995,7 +1082,8 @@ class Target(object):
             # print('middle from great circle:', middle, radec_middle)
             t_middle = t_start + t_step*(n_positions//2)
             radec_middle, _, _ = self.object.raDecVmag(t_middle.mjd, _jpl_eph, epoch='J2000',
-                                                       station=_station, output_Vmag=False, _inp=_inp)
+                                                       station=_station, output_Vmag=False,
+                                                       _cat_eop=_cat_eop)
             middle = SkyCoord(ra=radec_middle[0], dec=radec_middle[1], unit=(u.rad, u.rad), frame='icrs')
             # print('middle actual:', middle, radec_middle)
 
@@ -1106,52 +1194,20 @@ class Target(object):
                     t_start_star = np.max([t_start, t_approach_star - t_span])
                     t_stop_star = np.min([t_stop, t_approach_star + t_span])
 
-                    # _radec_start, _, _ = self.object.raDecVmag(t_start_star.mjd,
-                    #                                            _jpl_eph, epoch='J2000',
-                    #                                            station=_station,
-                    #                                            output_Vmag=True)
-                    # _radec_start = np.array(_radec_start)
-                    # _radec_start_sc = SkyCoord(ra=_radec_start[0], dec=_radec_start[1], unit=(u.rad, u.rad),
-                    #                            frame='icrs')
-                    #
-                    # _radec_approach, _, _ = self.object.raDecVmag(t_approach_star.mjd,
-                    #                                               _jpl_eph, epoch='J2000',
-                    #                                               station=_station,
-                    #                                               output_Vmag=True)
-                    # _radec_approach = np.array(_radec_approach)
-                    # _radec_approach_sc = SkyCoord(ra=_radec_approach[0], dec=_radec_approach[1], unit=(u.rad, u.rad),
-                    #                               frame='icrs')
-                    # print('closest approach point from time considerations:', _radec_approach_sc)
-                    #
-                    # # end of the 'arc'
-                    # _radec_stop, _, _ = self.object.raDecVmag(t_stop_star.mjd,
-                    #                                           _jpl_eph, epoch='J2000',
-                    #                                           station=_station,
-                    #                                           output_Vmag=True)
-                    # _radec_stop = np.array(_radec_stop)
-                    # _radec_stop_sc = SkyCoord(ra=_radec_stop[0], dec=_radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
-                    #
-                    # print('distances to start, approach, stop')
-                    # print(star_sc.separation(_radec_start_sc),
-                    #       star_sc.separation(_radec_approach_sc),
-                    #       star_sc.separation(_radec_stop_sc))
-                    #
-                    # raw_input('uh?')
-
                     # save:
                     # name [RA, Dec] min_distance_in_arcsec [window_start_time, window_stop_time], finding_chart_png
                     self.guide_stars.append([star['Source'], [star['RA_ICRS'], star['DE_ICRS']], star['__Gmag_'],
                                              distance_track * 180.0 / np.pi * 3600, [t_start_star, t_stop_star],
                                              'not available'])
 
-            if False:
-                self.plot_field(middle, window_size=window_size,
-                                radec_start=radec_start, vmag_start=vmag_start,
-                                radec_stop=radec_stop, vmag_stop=vmag_stop,
-                                exposure=t_stop-t_start,
-                                _model_psf=_model_psf, grid_stars=grid_stars,
-                                _highlight_brighter_than_mag=_m_lim_gs,
-                                _display_plot=True)
+            # if False:
+            #     self.plot_field(middle, window_size=window_size,
+            #                     radec_start=radec_start, vmag_start=vmag_start,
+            #                     radec_stop=radec_stop, vmag_stop=vmag_stop,
+            #                     exposure=t_stop-t_start,
+            #                     _model_psf=_model_psf, grid_stars=grid_stars,
+            #                     _highlight_brighter_than_mag=_m_lim_gs,
+            #                     _display_plot=True)
 
         # keep 3 closest and 3 brightest, plot 'finding charts'
         if len(self.guide_stars) > 0:
@@ -1177,81 +1233,101 @@ class Target(object):
             self.guide_stars = best_grid_stars
             # print(self.guide_stars.shape)
 
-            if _plot_field:
-                for si, star in enumerate(self.guide_stars):
-                    try:
-                        # print(star)
-                        star_name, star_radec, star_mag, star_min_dist, star_obs_window, _ = star
-                        t_start_star = star_obs_window[0]
-                        t_stop_star = star_obs_window[1]
-                        # print(star_name, star_radec, star_mag, star_min_dist, star_obs_window)
-
-                        radec_start_star, _, vmag_start_star = self.object.raDecVmag(t_start_star.mjd, _jpl_eph,
-                                                                                     epoch='J2000',
-                                                                                     station=_station,
-                                                                                     output_Vmag=True, _inp=_inp)
-                        radec_start_star = np.array(radec_start_star)
-                        # end of the 'arc'
-                        radec_stop_star, _, vmag_stop_star = self.object.raDecVmag(t_stop_star.mjd, _jpl_eph,
-                                                                                   epoch='J2000',
-                                                                                   station=_station,
-                                                                                   output_Vmag=True, _inp=_inp)
-                        radec_stop_star = np.array(radec_stop_star)
-
-                        # want to center on the track instead?
-                        # # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
-                        # rdecra_start_star = np.hstack([1.0, radec_start_star[::-1]])
-                        # rdecra_stop_star = np.hstack([1.0, radec_stop_star[::-1]])
-                        # start_cart_star = sph2cart(rdecra_start_star)
-                        # stop_cart_star = sph2cart(rdecra_stop_star)
-                        #
-                        # # middle point for the 'FoV':
-                        # lamb = 1 + np.dot(start_cart_star, stop_cart_star) / 1.0 ** 2
-                        # middle_cart_star = (start_cart_star + stop_cart_star) / np.sqrt(2.0 * lamb)
-                        # rdecra_middle_star = cart2sph(middle_cart_star)
-                        # radec_middle_star = rdecra_middle_star[:-3:-1]
-
-                        # 'FoV' + margins:
-                        ra_size_star = SkyCoord(ra=radec_start_star[0], dec=0, unit=(u.rad, u.rad), frame='icrs'). \
-                            separation(SkyCoord(ra=radec_stop_star[0], dec=0, unit=(u.rad, u.rad), frame='icrs')).rad
-                        dec_size_star = SkyCoord(ra=0, dec=radec_start_star[1], unit=(u.rad, u.rad), frame='icrs'). \
-                            separation(SkyCoord(ra=0, dec=radec_stop_star[1], unit=(u.rad, u.rad), frame='icrs')).rad
-                        window_size_star = np.array([ra_size_star, dec_size_star]) + 2.0 * np.array(
-                                                        [_margin * np.pi / 180.0 / 3600, _margin * np.pi / 180.0 / 3600])
-
-                        # Robo-AO VIC FoV is 36"x36":
-                        # window_size_star = np.array([36 * np.pi / 180.0 / 3600, 36 * np.pi / 180.0 / 3600])
-                        # in arcsec:
-                        # print('window_size in \":', window_size_star * 180.0 / np.pi * 3600)
-
-                        # window time span
-                        window_t_span_star = t_stop_star - t_start_star
-
-                        # stars in the field (without mag cut-off):
-                        star_sc = SkyCoord(ra=star_radec[0], dec=star_radec[1], unit=(u.deg, u.deg), frame='icrs')
-                        fov_stars = viz.query_region(star_sc, width=window_size_star[0] * u.rad,
-                                                     height=window_size_star[1] * u.rad,
-                                                     catalog=_guide_star_cat, cache=False)
-
-                        # center plot on star:
-                        print('plotting', self.object.name, star_name, star_obs_window[0], star_obs_window[1])
-                        plot_name = '_'.join(self.object.name.split(' ')) + '__' + \
-                                    '_'.join(str(star_name).split(' '))
-                        self.plot_field(star_sc, window_size=window_size_star,
-                                        radec_start=radec_start_star, vmag_start=vmag_start_star,
-                                        radec_stop=radec_stop_star, vmag_stop=vmag_stop_star,
-                                        exposure=window_t_span_star,
-                                        _model_psf=_model_psf, grid_stars=fov_stars[_guide_star_cat],
-                                        _highlight_brighter_than_mag=_m_lim_gs,
-                                        _display_plot=_display_plot, _save_plot=_save_plot,
-                                        path=_path_nightly_date, name=plot_name)
-                        # save the name if succesful:
-                        self.guide_stars[si, -1] = '{:s}.png'.format(plot_name)
-                    except Exception as e:
-                        print(e)
-                        traceback.print_exc()
-
         print('\t number of possible guide stars: {:d}'.format(len(self.guide_stars)))
+
+        return True
+
+    def plot_guide_stars(self, _jpl_eph, _guide_star_cat=u'I/337/gaia', _station=None,
+                         _margin=30.0, _m_lim_gs=16.0, _model_psf=None, _display_plot=False,
+                         _save_plot=False, _path_nightly_date='./', _cat_eop=None):
+        """
+            Plot fields with guide stars:
+        :param _jpl_eph:
+        :param _guide_star_cat:
+        :param _station:
+        :param _margin:
+        :param _m_lim_gs:
+        :param _model_psf:
+        :param _display_plot:
+        :param _save_plot:
+        :param _path_nightly_date:
+        :param _cat_eop:
+        :return:
+        """
+        for si, star in enumerate(self.guide_stars):
+            try:
+                # print(star)
+                star_name, star_radec, star_mag, star_min_dist, star_obs_window, _ = star
+                t_start_star = star_obs_window[0]
+                t_stop_star = star_obs_window[1]
+                # print(star_name, star_radec, star_mag, star_min_dist, star_obs_window)
+
+                radec_start_star, _, vmag_start_star = self.object.raDecVmag(t_start_star.mjd, _jpl_eph,
+                                                                             epoch='J2000',
+                                                                             station=_station,
+                                                                             output_Vmag=True,
+                                                                             _cat_eop=_cat_eop)
+                radec_start_star = np.array(radec_start_star)
+                # end of the 'arc'
+                radec_stop_star, _, vmag_stop_star = self.object.raDecVmag(t_stop_star.mjd, _jpl_eph,
+                                                                           epoch='J2000',
+                                                                           station=_station,
+                                                                           output_Vmag=True,
+                                                                           _cat_eop=_cat_eop)
+                radec_stop_star = np.array(radec_stop_star)
+
+                # want to center on the track instead?
+                # # first convert RA/Dec's on a unit sphere to Cartesian coordinates:
+                # rdecra_start_star = np.hstack([1.0, radec_start_star[::-1]])
+                # rdecra_stop_star = np.hstack([1.0, radec_stop_star[::-1]])
+                # start_cart_star = sph2cart(rdecra_start_star)
+                # stop_cart_star = sph2cart(rdecra_stop_star)
+                #
+                # # middle point for the 'FoV':
+                # lamb = 1 + np.dot(start_cart_star, stop_cart_star) / 1.0 ** 2
+                # middle_cart_star = (start_cart_star + stop_cart_star) / np.sqrt(2.0 * lamb)
+                # rdecra_middle_star = cart2sph(middle_cart_star)
+                # radec_middle_star = rdecra_middle_star[:-3:-1]
+
+                # 'FoV' + margins:
+                ra_size_star = SkyCoord(ra=radec_start_star[0], dec=0, unit=(u.rad, u.rad), frame='icrs'). \
+                    separation(SkyCoord(ra=radec_stop_star[0], dec=0, unit=(u.rad, u.rad), frame='icrs')).rad
+                dec_size_star = SkyCoord(ra=0, dec=radec_start_star[1], unit=(u.rad, u.rad), frame='icrs'). \
+                    separation(SkyCoord(ra=0, dec=radec_stop_star[1], unit=(u.rad, u.rad), frame='icrs')).rad
+                window_size_star = np.array([ra_size_star, dec_size_star]) + 2.0 * np.array(
+                    [_margin * np.pi / 180.0 / 3600, _margin * np.pi / 180.0 / 3600])
+
+                # Robo-AO VIC FoV is 36"x36":
+                # window_size_star = np.array([36 * np.pi / 180.0 / 3600, 36 * np.pi / 180.0 / 3600])
+                # in arcsec:
+                # print('window_size in \":', window_size_star * 180.0 / np.pi * 3600)
+
+                # window time span
+                window_t_span_star = t_stop_star - t_start_star
+
+                # stars in the field (without mag cut-off):
+                star_sc = SkyCoord(ra=star_radec[0], dec=star_radec[1], unit=(u.deg, u.deg), frame='icrs')
+                fov_stars = viz.query_region(star_sc, width=window_size_star[0] * u.rad,
+                                             height=window_size_star[1] * u.rad,
+                                             catalog=_guide_star_cat, cache=False)
+
+                # center plot on star:
+                print('plotting', self.object.name, star_name, star_obs_window[0], star_obs_window[1])
+                plot_name = '_'.join(self.object.name.split(' ')) + '__' + \
+                            '_'.join(str(star_name).split(' '))
+                self.plot_field(star_sc, window_size=window_size_star,
+                                radec_start=radec_start_star, vmag_start=vmag_start_star,
+                                radec_stop=radec_stop_star, vmag_stop=vmag_stop_star,
+                                exposure=window_t_span_star,
+                                _model_psf=_model_psf, grid_stars=fov_stars[_guide_star_cat],
+                                _highlight_brighter_than_mag=_m_lim_gs,
+                                _display_plot=_display_plot, _save_plot=_save_plot,
+                                path=_path_nightly_date, name=plot_name)
+                # save the name if succesful:
+                self.guide_stars[si, -1] = '{:s}.png'.format(plot_name)
+            except Exception as e:
+                print(e)
+                traceback.print_exc()
 
     @staticmethod
     def plot_field(target, window_size, radec_start, vmag_start, radec_stop, vmag_stop,
@@ -1457,7 +1533,7 @@ class TargetList(object):
         self.date = _date
 
         # load pypride stuff
-        self.eops = load_eop(_inp=self.inp, _date=_date)
+        self.eops = load_eops(_cat_eop=self.inp['cat_eop'], _date=_date)
 
         if _observatory == 'kpno':
             # site: KPNO 2.1 m: 31.958182 N, -111.598273 W, 2086.7 m (31d57'29.5"N 111d35'53.8"W)
@@ -1473,51 +1549,26 @@ class TargetList(object):
         # self.targets = []
 
     @staticmethod
-    def _generate_24hr_grid(t0, start, end, N, for_deriv=False):
+    def azels(tt, eops, jpl_eph, vw, lon_gcen, u, v, r_GTRS, radecs):
         """
-        Generate a nearly linearly spaced grid of time durations.
-        The midpoints of these grid points will span times from ``t0``+``start``
-        to ``t0``+``end``, including the end points, which is useful when taking
-        numerical derivatives.
-        Parameters
-        ----------
-        t0 : `~astropy.time.Time`
-            Time queried for, grid will be built from or up to this time.
-        start : float
-            Number of days before/after ``t0`` to start the grid.
-        end : float
-            Number of days before/after ``t0`` to end the grid.
-        N : int
-            Number of grid points to generate
-        for_deriv : bool
-            Generate time series for taking numerical derivative (modify
-            bounds)?
-        Returns
-        -------
-        `~astropy.time.Time`
-        """
+            ra, dec - this is for moving objects, in general. therefore, they must be arrays of the same size as tt
 
-        if for_deriv:
-            time_grid = np.concatenate([[start - 1 / (N - 1)],
-                                        np.linspace(start, end, N)[1:-1],
-                                        [end + 1 / (N - 1)]]) * u.day
-        else:
-            time_grid = np.linspace(start, end, N) * u.day
-
-        return t0 + time_grid
-
-    @staticmethod
-    def altaz(tt, eops, jpl_eph, vw, lon_gcen, u, v, r_GTRS, ra, dec):
-        """
+            return in radians
         """
         ''' set coordinates '''
-        K_s = np.array([np.cos(dec) * np.cos(ra),
-                        np.cos(dec) * np.sin(ra),
-                        np.sin(dec)])
+        # K_s = np.array([np.cos(dec) * np.cos(ra),
+        #                 np.cos(dec) * np.sin(ra),
+        #                 np.sin(dec)])
+
+        # source vectors:
+        K_s = np.vstack([np.cos(radecs[:, 1]) * np.cos(radecs[:, 0]),
+                         np.cos(radecs[:, 1]) * np.sin(radecs[:, 0]),
+                         np.sin(radecs[:, 1])])
 
         azels = []
+        azels_sun = []
 
-        for t in tt:
+        for ti, t in enumerate(tt):
             ''' set dates: '''
             tstamp = t.datetime
             mjd = np.floor(t.mjd)
@@ -1534,235 +1585,164 @@ class TargetList(object):
             CT, dTAIdCT = t_eph(JD, UT1, TT, lon_gcen, u, v)
 
             ''' rotation matrix IERS '''
-            r2000 = ter2cel(tstamp, eop_int, dTAIdCT, 'iau2000')
+            r2000 = GTRS_to_GCRS(tstamp, eop_int, dTAIdCT)
 
             ''' do not compute displacements due to geophysical effects '''
 
-            ''' get only the velocity '''
+            ''' get position and velocity in GCRS '''
+            r_GCRS = np.dot(r2000[:, :, 0], r_GTRS)
             v_GCRS = np.dot(r2000[:, :, 1], r_GTRS)
 
             ''' earth position '''
             rrd = pleph(JD + CT, 3, 12, jpl_eph)
             earth = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
 
-            az, el = aber_source(v_GCRS, vw, K_s, r2000, earth)
+            ''' sun position '''
+            rrd = pleph(JD + CT, 11, 12, jpl_eph)
+            sun = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
+            r = sun[:, 0] - (r_GCRS + earth[:, 0])
+            ra = np.arctan2(r[1], r[0])  # right ascension
+            dec = np.arctan(r[2] / np.sqrt(r[0] ** 2 + r[1] ** 2))  # declination
+            if ra < 0:
+                ra += 2.0 * np.pi
+            K_s_sun = np.array([np.cos(dec) * np.cos(ra),
+                                np.cos(dec) * np.sin(ra),
+                                np.sin(dec)])
+
+            # refraction formula:
+            # from 'U. S. Naval Observatory\'s Vector Astrometry Software':
+            # 1.02 * (1.0 / np.tan(0 + 10.3 / (0 + 5.11)))
+
+            az, el = aber_source(v_GCRS, vw, K_s[:, ti], r2000, earth)
+            az_sun, el_sun = aber_source(v_GCRS, vw, K_s_sun, r2000, earth)
+
             azels.append([az, el])
+            azels_sun.append([az_sun, el_sun])
 
-        return azels
+        return np.array(azels), np.array(azels_sun)
 
-    def get_hour_angle_limit(self, time, ra, dec, N=40):
+    def observability(self, times, radecs, Vmags, twilight='nautical', fraction=0.1):
         """
-        Time at next transit of the meridian of `target`.
+            Check target observability
         Parameters
         ----------
-        time : `~astropy.time.Time` or other (see below)
+        times : `~astropy.time.Time` or other (see below)
             Time of observation. This will be passed in as the first argument to
             the `~astropy.time.Time` initializer, so it can be anything that
             `~astropy.time.Time` will accept (including a `~astropy.time.Time`
             object)
-        ra : object RA
-        dec : object Dec
-        N : int
-            Number of altitudes to compute when searching for
-            rise or set.
+        radecs : object RA and Dec s
+        twilight:
+        fraction:
+
         Returns
         -------
-        ret1 : bool if target crosses the meridian or not during the night
+        ret1 : bool if target observable or not during the night
+        ret2 : bool if target crosses the meridian or not during the night
+        ret3 : azels for the night
         """
-        if not isinstance(time, Time):
-            time = Time(time)
-        times = self._generate_24hr_grid(time[0], 0, 1, N, for_deriv=False)
-
-        # The derivative of the altitude with respect to time is increasing
-        # from negative to positive values at the anti-transit of the meridian
-        # if antitransit:
-        #     rise_set = 'rising'
-        # else:
-        #     rise_set = 'setting'
+        # if not isinstance(time, Time):
+        #     time = Time(time)
+        # times = self._generate_24hr_grid(time[0], 0, 1, N, for_deriv=False)
 
         # r_GTRS = np.array(self.observatory.location.value)
-        altaz = self.altaz(times, self.eops, self.inp['jpl_eph'], self.sta.vw, self.sta.lon_gcen,
-                           self.sta.u, self.sta.v, self.sta.r_GTRS, ra, dec)
-        altitudes = np.array(altaz)[:, 1]
+        azels, azels_sun = self.azels(times, self.eops, self.inp['jpl_eph'], self.sta.vw, self.sta.lon_gcen,
+                                      self.sta.u, self.sta.v, self.sta.r_GTRS, radecs)
+        altitudes = np.array(azels)[:, 1]
+        altitudes_sun = np.array(azels_sun)[:, 1]
         # print(np.array(zip(times.iso, altitudes*180/np.pi)))
         # print('\n')
 
-        t = np.linspace(0, 1, N)
-        p = np.polyfit(t, altitudes, 6)
-        dense = np.polyval(p, np.linspace(0, 1, 200))
-        maxp = np.max(dense)
-        root = np.argmax(dense)/200.0
-        minus = np.polyval(p, maxp - 0.01)
-        plus = np.polyval(p, maxp + 0.01)
+        # to check meridian crossing when above the horizon
+        t = np.linspace(0, 1, len(times))
+        # dense grid with source elevations:
+        t_dense = np.linspace(0, 1, 200)
+        # p = np.polyfit(t, altitudes, 6)
+        # altitudes_dense = np.polyval(p, t_dense)
+        altitudes_dense, _ = lagint(3, t, altitudes, t_dense)
+
+        maxp = np.argmax(altitudes_dense)
+        maxv = np.max(altitudes_dense)
+        root = maxp / float(len(t_dense))
+        # minus = np.polyval(p, maxp - 0.01)
+        # plus = np.polyval(p, maxp + 0.01)
+        # dve shagi nalevo, dve shagi napravo:
+        minus, _ = lagint(3, t_dense, altitudes_dense, root - 0.01)
+        plus, _ = lagint(3, t_dense, altitudes_dense, root + 0.01)
+        # print(times[0], root * u.day, times[-1], maxv, minus, plus)
+
+        # when above the horizon!
+        crosses_meridian = (times[0] + root * u.day < times[-1]) and (np.max((minus, plus)) < maxv)
+
+        # to check observability:
+        # dense grid with sun elevations:
+        # p_sun = np.polyfit(t, altitudes_sun, 6)
+        # altitudes_sun_dense = np.polyval(p_sun, t_dense)
+        altitudes_sun_dense, _ = lagint(3, t, altitudes_sun, t_dense)
+
+        # densify Vmags too:
+        # p_Vmag = np.polyfit(t, Vmags, 6)
+        # Vmags_dense = np.polyval(p_Vmag, t_dense)
+        Vmags_dense, _ = lagint(3, t, Vmags, t_dense)
+
+        if twilight == 'astronomical':
+            sun_elv_lim = -18  # deg
+        elif twilight == 'civil':
+            sun_elv_lim = -6
+        elif twilight == 'nautical':
+            sun_elv_lim = -12
+        else:
+            sun_elv_lim = -12
+
+        # fig = plt.figure()
+        # ax = fig.add_subplot(311)
+        # ax.plot(t_dense, altitudes_dense * 180/np.pi)
+        # ax = fig.add_subplot(312)
+        # ax.plot(t_dense, altitudes_sun_dense * 180/np.pi)
+        # ax = fig.add_subplot(313)
+        # ax.plot(t_dense, Vmags_dense)
+        # plt.show()
+
+        # condition checks:
+        observability_array = np.all(np.vstack([altitudes_dense >= self.elv_lim * np.pi / 180.0,
+                                                altitudes_sun_dense <= sun_elv_lim * np.pi / 180.0,
+                                                Vmags_dense <= self.m_lim]), axis=0)
+        # print(self.elv_lim, sun_elv_lim, self.m_lim, np.sum(observability_array), float(len(observability_array)),
+        #       np.sum(observability_array)/float(len(observability_array)) >= fraction)
+
+        # np.sum counts True values in observability_array
+        observable = np.sum(observability_array) / float(len(observability_array)) >= fraction
 
         # print('pypride ', (time[0] + root * u.day).iso)
-        # return bool if crosses the meridian and array with elevations
-        return (time[0] + root*u.day < time[1]) and (np.max((minus, plus)) < maxp), \
-                zip(times.iso, altitudes*180/np.pi)
 
-    def target_list_all(self, day, mask=None, parallel=False, epoch='J2000', output_Vmag=True):
+        # print(observable, crosses_meridian)
+        # raw_input()
+
+        # return bool if observable, crosses the meridian and array with source azimuths and elevations
+        return observable, crosses_meridian, azels
+
+    def target_list(self, _date, _mask=None, _parallel=False, _epoch='J2000', _output_Vmag=True, _night_grid_n=50,
+                    _twilight='nautical', _fraction=0.1):
         """
-            Get observational parameters for a (masked) target list from self.database
+            Get observational parameters for a (masked) target list from self.database for bright enough targets
+            Check whether targets are observable and store only those
+            Implement in subclass
         """
-        # get middle of night:
-        night, middle_of_night = self.middle_of_night(day)
-        mjd = middle_of_night.tdb.mjd  # in TDB!!
-        # print(middle_of_night.datetime)
+        raise NotImplementedError
 
-        # iterate over targets:
-        target_list = []
-        if mask is None:
-            mask = range(0, len(self.database))
-
-        # do it in parallel
-        if parallel:
-            ttic = _time()
-            n_cpu = multiprocessing.cpu_count()
-            # create pool
-            pool = multiprocessing.Pool(n_cpu)
-            # asynchronously apply target_list_all_helper
-            database_masked = self.database[mask]
-            args = [(self, target, mjd, epoch, output_Vmag) for target in database_masked]
-            result = pool.map_async(target_list_all_helper, args)
-            # close bassejn
-            pool.close()  # we are not adding any more processes
-            pool.join()  # wait until all threads are done before going on
-            # get the ordered results
-            targets_all = result.get()
-            # print(targets_all)
-            # get only the asteroids that are bright enough
-            target_list = [[AsteroidDatabase.init_asteroid(database_masked[_it])] + [middle_of_night] + _t
-                            for _it, _t in enumerate(targets_all) if _t[2] <= self.m_lim]
-
-            # set hour angle limit if asteroid crosses the meridian during the night
-            pool = multiprocessing.Pool(n_cpu)
-            # asynchronously apply target_list_all_helper
-            target_list = np.array(target_list)
-            args = [(self, radec, night) for (_, _, radec, _, _) in target_list]
-            result = pool.map_async(hour_angle_limit_helper, args)
-            # close bassejn
-            pool.close()  # we are not adding any more processes
-            pool.join()  # wait until all threads are done before going on
-            # get the ordered results
-            meridian_transiting_asteroids = np.array(result.get(), dtype=object)
-            # stack the result with target_list
-            target_list = np.hstack((target_list, meridian_transiting_asteroids))
-            print('parallel computation took: {:.2f} s'.format(_time() - ttic))
-        else:
-            ttic = _time()
-            for ia, asteroid in enumerate(self.database[mask]):
-                # print '\n', len(self.database)-ia
-                # print('\n', asteroid)
-                # in the middle of night...
-                # tic = _time()
-                radec, radec_dot, Vmag = self.getObsParams(asteroid, mjd, epoch, output_Vmag)
-                # print(len(self.database)-ia, _time() - tic)
-                # skip if too dim
-                if Vmag <= self.m_lim:
-                    meridian_transit, t_azel = self.get_hour_angle_limit(night, radec[0], radec[1], N=40)
-                    target_list.append([AsteroidDatabase.init_asteroid(asteroid), middle_of_night,
-                                        radec, radec_dot, Vmag, meridian_transit, t_azel])
-            target_list = np.array(target_list)
-            print('serial computation took: {:.2f} s'.format(_time() - ttic))
-
-        print('Total targets brighter than {:.1f}: {:d}'.format(self.m_lim, len(target_list)))
-
-        # set up target objects for self.targets:
-        for entry in target_list:
-            target = Target(_object=entry[0])
-            target.set_epoch(entry[1])
-            target.set_radec(entry[2])
-            target.set_radec_dot(entry[3])
-            target.set_mag(entry[4])
-            target.set_meridian_crossing(entry[5])
-            target.set_t_el(entry[6])
-            self.targets = np.append(self.targets, target)
-            # self.targets.append(target)
-        # print('targets:', self.targets)
-
-    def target_list_observable(self, day, twilight='nautical', fraction=0.1):
-        """ Check whether targets are observable and return only those
-
-        :param day:
-        :param twilight:
-        :param fraction:
-        :return:
-        """
-        if len(self.targets) == 0:
-            print('no targets in the target list')
-            return
-
-        night, middle_of_night = self.middle_of_night(day)
-        # set constraints (above self.elv_lim deg altitude, Sun altitude < -N deg [dep.on twilight])
-        constraints = [AltitudeConstraint(self.elv_lim * u.deg, 90 * u.deg)]
-        if twilight == 'nautical':
-            constraints.append(AtNightConstraint.twilight_nautical())
-        elif twilight == 'astronomical':
-            constraints.append(AtNightConstraint.twilight_astronomical())
-        elif twilight == 'civil':
-            constraints.append(AtNightConstraint.twilight_civil())
-
-        radec = np.array([_target.radec for _target in self.targets])
-        # print(radec.shape)
-        # tic = _time()
-        coords = SkyCoord(ra=radec[:, 0], dec=radec[:, 1], unit=(u.rad, u.rad), frame='icrs')
-        # print(_time() - tic)
-        tic = _time()
-        table = observability_table(constraints, self.observatory, coords,
-                                    time_range=night, time_grid_resolution=0.25*u.hour)
-        print('observability computation took: {:.2f} s'.format(_time() - tic))
-        # print(table)
-
-        # proceed with observable (for more than 5% of the night) targets only
-        mask_observable = table['fraction of time observable'] > fraction
-        # print(mask_observable)
-
-        target_list_observeable = self.targets[mask_observable]
-        print('total bright asteroids: ', len(self.targets),
-              'observable: ', len(target_list_observeable))
-
-        for tn, target in enumerate(self.targets):
-            self.targets[tn].set_is_observable(True) if mask_observable[tn] \
-                else self.targets[tn].set_is_observable(False)
-
-    def getObsParams(self, target, _mjd, epoch='J2000', output_Vmag=True):
+    def get_obs_params(self, target, _mjd, epoch='J2000', output_Vmag=True):
         """ Compute obs parameters for a given t
 
-        :param target: Kepler class object
-        :param mjd: epoch in TDB/mjd (t.tdb.mjd, t - astropy.Time object, UTC)
-        :return: radec in rad, radec_dot in arcsec/s, Vmag
         """
+        raise NotImplementedError
 
-        AU_DE421 = 1.49597870699626200e+11  # m
-        GSUN = 0.295912208285591100e-03 * AU_DE421**3 / 86400.0**2
-        # convert AU to m:
-        a = target['a'] * AU_DE421
-        e = target['e']
-        # convert deg to rad:
-        i = target['i'] * np.pi / 180.0
-        w = target['w'] * np.pi / 180.0
-        Node = target['Node'] * np.pi / 180.0
-        M0 = target['M0'] * np.pi / 180.0
-        t0 = target['epoch']
-        H = target['H']
-        G = target['G']
-
-        asteroid = Asteroid(target['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
-
-        # jpl_eph - path to eph used by pypride
-        radec, radec_dot, Vmag = asteroid.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
-                                                    epoch=epoch, output_Vmag=output_Vmag, _inp=self.inp)
-        #    print(radec.ra.hms, radec.dec.dms, radec_dot, Vmag)
-
-        return radec, radec_dot, Vmag
-
-    def middle_of_night(self, day):
+    def get_night(self, _date, night_grid_n=50):
         """
-            day - datetime.datetime object, 0h UTC of the coming day
+            _date - datetime.datetime object, 0h UTC of the coming day
         """
-        #        day = datetime.datetime(2015,11,7) # for KP, in UTC it is always 'tomorrow'
-        nextDay = day + datetime.timedelta(days=1)
-        astrot = Time([str(day), str(nextDay)], format='iso', scale='utc')
+        nextDay = _date + datetime.timedelta(days=1)
+        astrot = Time([_date.strftime('%Y-%m-%d %H:%M:%S.%f'), nextDay.strftime('%Y-%m-%d %H:%M:%S.%f')],
+                      format='iso', scale='utc')
         # when the night comes, heh?
         sunSet = self.observatory.sun_set_time(astrot[0])
         sunRise = self.observatory.sun_rise_time(astrot[1])
@@ -1773,11 +1753,10 @@ class TargetList(object):
                       sunRise.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f')],
                      format='iso', scale='utc')
 
-        # build time grid for the night to come
-        time_grid = time_grid_from_range(night)
-        middle_of_night = time_grid[len(time_grid) / 2]
+        night_len = (night[1] - night[0]).sec / 86400.0  # in days
+        time_grid = np.linspace(0, night_len, night_grid_n) * u.day
 
-        return night, middle_of_night
+        return night, night[0] + time_grid
 
     def get_observing_windows(self, day):
         """
@@ -1791,7 +1770,7 @@ class TargetList(object):
         # print(self.targets)
 
         # get night:
-        night, _ = self.middle_of_night(day)
+        night, _ = self.get_night(day)
 
         for tn, target in enumerate(self.targets):
             if target.is_observable:
@@ -1829,13 +1808,24 @@ class TargetList(object):
         else:
             for tn, target in enumerate(self.targets):
                 if target.is_observable:
-                    self.targets[tn].set_guide_stars(_jpl_eph=self.inp['jpl_eph'], _guide_star_cat=_guide_star_cat,
-                                           _station=self.sta, _radius=_radius, _margin=_margin,
-                                           _m_lim_gs=_m_lim_gs, _plot_field=_plot_field, _model_psf=model_psf,
-                                           _display_plot=_display_plot, _save_plot=_save_plot,
-                                           _path_nightly_date=_path_nightly_date, _inp=self.inp)
+                    status = self.targets[tn].set_guide_stars(_jpl_eph=self.inp['jpl_eph'],
+                                                              _guide_star_cat=_guide_star_cat,
+                                                              _station=self.sta, _radius=_radius, _margin=_margin,
+                                                              _m_lim_gs=_m_lim_gs, _cat_eop=self.inp['cat_eop'])
+                    if status and _plot_field:
+                        self.targets[tn].plot_guide_stars(_jpl_eph=self.inp['jpl_eph'], _guide_star_cat=_guide_star_cat,
+                                                          _station=self.sta, _margin=_margin,
+                                                          _m_lim_gs=_m_lim_gs, _model_psf=model_psf,
+                                                          _display_plot=_display_plot, _save_plot=_save_plot,
+                                                          _path_nightly_date=_path_nightly_date,
+                                                          _cat_eop=self.inp['cat_eop'])
 
     def make_nightly_json(self, _path_nightly_date='./'):
+        """
+            Create json file with bright objects
+        :param _path_nightly_date:
+        :return:
+        """
 
         json_dict = OrderedDict([tr.to_dict() for tr in self.targets])
         # print(json_dict)
@@ -1850,325 +1840,95 @@ class TargetList(object):
             json.dump(json_dict, fj, indent=4)  # sort_keys=True,
 
 
-class TargetListAsteroids(object):
+class TargetListAsteroids(TargetList):
     """
         Produce (nightly) target list for the asteroids project
     """
 
     def __init__(self, _f_inp, database_source='mpc', database_file=None, _observatory='kpno',
                  _m_lim=16.0, _elv_lim=40.0, _date=None, timezone='America/Phoenix'):
-        # init database
-        if database_source == 'mpc':
-            if database_file is None:
-                db = AsteroidDatabaseMPC()
-            else:
-                db = AsteroidDatabaseMPC(_f_database=database_file)
-        elif database_source == 'jpl':
-            if database_file is None:
-                db = AsteroidDatabaseJPL()
-            else:
-                db = AsteroidDatabaseJPL(_f_database=database_file)
-        else:
-            raise Exception('database source not understood')
-        # load the database
-        db.load()
 
-        self.database = db.database
-        # observatory object
-        self.observatory = Observer.at_site(_observatory)
+        # simply init super class
+        TargetList.__init__(self, _f_inp=_f_inp, database_source=database_source, database_file=database_file,
+                            _observatory=_observatory, _m_lim=_m_lim, _elv_lim=_elv_lim, _date=_date, timezone=timezone)
 
-        # minimum object magnitude to be output
-        self.m_lim = _m_lim
-
-        # elevation cutoff
-        self.elv_lim = _elv_lim
-
-        # inp file for running pypride:
-        inp = inp_set(_f_inp)
-        self.inp = inp.get_section('all')
-
-        # update pypride eops
-        if internet_on():
-            eop_update(self.inp['cat_eop'], 3)
-
-        ''' load eops '''
-        if _date is None:
-            _now = datetime.datetime.now(pytz.timezone(timezone))
-            _date = datetime.datetime(_now.year, _now.month, _now.day) + datetime.timedelta(days=1)
-
-        self.date = _date
-
-        # load pypride stuff
-        if _observatory == 'kpno':
-            self.eops = load_eop(_inp=self.inp, _date=_date)
-
-            # site: KPNO 2.1 m: 31.958182 N, -111.598273 W, 2086.7 m (31d57'29.5"N 111d35'53.8"W)
-            r_GTRS = geodetic2Ecef(lat=31.958182 * np.pi / 180.0, lon=-111.598273 * np.pi / 180.0, h=2086.7e-3)
-            r_GTRS = np.array(r_GTRS) * 1e3  # in meters
-            self.sta = Site(r_GTRS)
-        else:
-            print('Station is not Kitt Peak! Falling back to geocentric ra/decs')
-            self.eops = load_eop(_inp=self.inp, _date=_date)
-            self.sta = Site([0, 0, 0])
-
-        ''' targets '''
-        self.targets = np.array([], dtype=object)
-        # self.targets = []
-
-    @staticmethod
-    def _generate_24hr_grid(t0, start, end, N, for_deriv=False):
-        """
-        Generate a nearly linearly spaced grid of time durations.
-        The midpoints of these grid points will span times from ``t0``+``start``
-        to ``t0``+``end``, including the end points, which is useful when taking
-        numerical derivatives.
-        Parameters
-        ----------
-        t0 : `~astropy.time.Time`
-            Time queried for, grid will be built from or up to this time.
-        start : float
-            Number of days before/after ``t0`` to start the grid.
-        end : float
-            Number of days before/after ``t0`` to end the grid.
-        N : int
-            Number of grid points to generate
-        for_deriv : bool
-            Generate time series for taking numerical derivative (modify
-            bounds)?
-        Returns
-        -------
-        `~astropy.time.Time`
-        """
-
-        if for_deriv:
-            time_grid = np.concatenate([[start - 1 / (N - 1)],
-                                        np.linspace(start, end, N)[1:-1],
-                                        [end + 1 / (N - 1)]]) * u.day
-        else:
-            time_grid = np.linspace(start, end, N) * u.day
-
-        return t0 + time_grid
-
-    @staticmethod
-    def altaz(tt, eops, jpl_eph, vw, lon_gcen, u, v, r_GTRS, ra, dec):
-        """
-        """
-        ''' set coordinates '''
-        K_s = np.array([np.cos(dec) * np.cos(ra),
-                        np.cos(dec) * np.sin(ra),
-                        np.sin(dec)])
-
-        azels = []
-
-        for t in tt:
-            ''' set dates: '''
-            tstamp = t.datetime
-            mjd = np.floor(t.mjd)
-            UTC = (tstamp.hour + tstamp.minute / 60.0 + tstamp.second / 3600.0) / 24.0
-            JD = mjd + 2400000.5
-
-            ''' compute tai & tt '''
-            TAI, TT = taitime(mjd, UTC)
-
-            ''' interpolate eops to tstamp '''
-            UT1, eop_int = eop_iers(mjd, UTC, eops)
-
-            ''' compute coordinate time fraction of CT day at GC '''
-            CT, dTAIdCT = t_eph(JD, UT1, TT, lon_gcen, u, v)
-
-            ''' rotation matrix IERS '''
-            r2000 = ter2cel(tstamp, eop_int, dTAIdCT, 'iau2000')
-
-            ''' do not compute displacements due to geophysical effects '''
-
-            ''' get only the velocity '''
-            v_GCRS = np.dot(r2000[:, :, 1], r_GTRS)
-
-            ''' earth position '''
-            rrd = pleph(JD + CT, 3, 12, jpl_eph)
-            earth = np.reshape(np.asarray(rrd), (3, 2), 'F') * 1e3
-
-            az, el = aber_source(v_GCRS, vw, K_s, r2000, earth)
-            azels.append([az, el])
-
-        return azels
-
-    def get_hour_angle_limit(self, time, ra, dec, N=40):
-        """
-        Time at next transit of the meridian of `target`.
-        Parameters
-        ----------
-        time : `~astropy.time.Time` or other (see below)
-            Time of observation. This will be passed in as the first argument to
-            the `~astropy.time.Time` initializer, so it can be anything that
-            `~astropy.time.Time` will accept (including a `~astropy.time.Time`
-            object)
-        ra : object RA
-        dec : object Dec
-        N : int
-            Number of altitudes to compute when searching for
-            rise or set.
-        Returns
-        -------
-        ret1 : bool if target crosses the meridian or not during the night
-        """
-        if not isinstance(time, Time):
-            time = Time(time)
-        times = self._generate_24hr_grid(time[0], 0, 1, N, for_deriv=False)
-
-        # The derivative of the altitude with respect to time is increasing
-        # from negative to positive values at the anti-transit of the meridian
-        # if antitransit:
-        #     rise_set = 'rising'
-        # else:
-        #     rise_set = 'setting'
-
-        # r_GTRS = np.array(self.observatory.location.value)
-        altaz = self.altaz(times, self.eops, self.inp['jpl_eph'], self.sta.vw, self.sta.lon_gcen,
-                           self.sta.u, self.sta.v, self.sta.r_GTRS, ra, dec)
-        altitudes = np.array(altaz)[:, 1]
-        # print(np.array(zip(times.iso, altitudes*180/np.pi)))
-        # print('\n')
-
-        t = np.linspace(0, 1, N)
-        p = np.polyfit(t, altitudes, 6)
-        dense = np.polyval(p, np.linspace(0, 1, 200))
-        maxp = np.max(dense)
-        root = np.argmax(dense)/200.0
-        minus = np.polyval(p, maxp - 0.01)
-        plus = np.polyval(p, maxp + 0.01)
-
-        # print('pypride ', (time[0] + root * u.day).iso)
-        # return bool if crosses the meridian and array with elevations
-        return (time[0] + root*u.day < time[1]) and (np.max((minus, plus)) < maxp), \
-                zip(times.iso, altitudes*180/np.pi)
-
-    def target_list_all(self, day, mask=None, parallel=False, epoch='J2000', output_Vmag=True):
+    def target_list(self, _date, _mask=None, _parallel=False, _epoch='J2000',
+                    _output_Vmag=True, _night_grid_n=50, _twilight='nautical', _fraction=0.1):
         """
             Get observational parameters for a (masked) target list
             from self.database
         """
         # get middle of night:
-        night, middle_of_night = self.middle_of_night(day)
-        mjd = middle_of_night.tdb.mjd  # in TDB!!
-        # print(middle_of_night.datetime)
+        night, night_grid = self.get_night(date, _night_grid_n)
+        mjds = night_grid.tdb.mjd  # in TDB!!
+
         # iterate over asteroids:
         target_list = []
-        if mask is None:
-            mask = range(0, len(self.database))
+        if _mask is None:
+            _mask = range(0, len(self.database))
 
         # do it in parallel
-        if parallel:
+        if _parallel:
             ttic = _time()
             n_cpu = multiprocessing.cpu_count()
             # create pool
             pool = multiprocessing.Pool(n_cpu)
-            # asynchronously apply target_list_all_helper
-            database_masked = self.database[mask]
-            args = [(self, asteroid, mjd, epoch, output_Vmag) for asteroid in database_masked]
-            result = pool.map_async(target_list_all_helper, args)
+            # asynchronously apply target_list_helper
+            database_masked = self.database[_mask]
+            args = [(self, asteroid, mjds, _epoch, _output_Vmag, night_grid, _twilight, _fraction)
+                    for asteroid in database_masked]
+            result = pool.map_async(target_list_helper, args)
             # close bassejn
             pool.close()  # we are not adding any more processes
             pool.join()  # wait until all threads are done before going on
             # get the ordered results
             targets_all = result.get()
-            # print(targets_all)
-            # get only the asteroids that are bright enough
-            target_list = [[AsteroidDatabase.init_asteroid(database_masked[_it])] + [middle_of_night] + _t
-                            for _it, _t in enumerate(targets_all) if _t[2] <= self.m_lim]
-
-            # set hour angle limit if asteroid crosses the meridian during the night
-            pool = multiprocessing.Pool(n_cpu)
-            # asynchronously apply target_list_all_helper
+            target_list = [_t for _t in targets_all if _t is not None]
             target_list = np.array(target_list)
-            args = [(self, radec, night) for (_, _, radec, _, _) in target_list]
-            result = pool.map_async(hour_angle_limit_helper, args)
-            # close bassejn
-            pool.close()  # we are not adding any more processes
-            pool.join()  # wait until all threads are done before going on
-            # get the ordered results
-            meridian_transiting_asteroids = np.array(result.get(), dtype=object)
-            # stack the result with target_list
-            target_list = np.hstack((target_list, meridian_transiting_asteroids))
             print('parallel computation took: {:.2f} s'.format(_time() - ttic))
         else:
             ttic = _time()
-            for ia, asteroid in enumerate(self.database[mask]):
-                # print '\n', len(self.database)-ia
-                # print('\n', asteroid)
-                # in the middle of night...
-                # tic = _time()
-                radec, radec_dot, Vmag = self.getObsParams(asteroid, mjd, epoch, output_Vmag)
-                # print(len(self.database)-ia, _time() - tic)
+            for ia, asteroid in enumerate(self.database[_mask]):
+                print(asteroid['name'])
+                tic = _time()
+                # target can move fast, so compute radec/dots on a grid for the whole night
+                radecs, radec_dots, Vmags = [], [], []
+                for mjd in mjds:
+                    radec, radec_dot, Vmag = self.get_obs_params(asteroid, mjd, _epoch, _output_Vmag)
+                    radecs.append(radec)
+                    radec_dots.append(radec_dot)
+                    Vmags.append(Vmag)
+                radecs = np.array(radecs)
+                radec_dots = np.array(radec_dots)
+                Vmags = np.array(Vmags)
+
+                print(len(self.database)-ia, _time() - tic)
                 # skip if too dim
-                if Vmag <= self.m_lim:
-                    meridian_transit, t_azel = self.get_hour_angle_limit(night, radec[0], radec[1], N=40)
-                    target_list.append([AsteroidDatabase.init_asteroid(asteroid), middle_of_night,
-                                        radec, radec_dot, Vmag, meridian_transit, t_azel])
+                if np.min(Vmags) <= self.m_lim:
+                    observable, meridian_transit, azels = self.observability(night_grid, radecs, Vmags,
+                                                                             twilight=_twilight, fraction=_fraction)
+                    target_list.append([AsteroidDatabase.init_asteroid(asteroid), observable, meridian_transit,
+                                        radecs, radec_dots, azels, Vmags])
             target_list = np.array(target_list)
             print('serial computation took: {:.2f} s'.format(_time() - ttic))
 
-        print('Total targets brighter than {:.1f}: {:d}'.format(self.m_lim, len(target_list)))
+        print('Total targets brighter than {:.1f}: {:d}'.format(self.m_lim, target_list.shape[0]))
+        print('Total observable targets: {:d}'.format(np.count_nonzero(target_list[:, 1])))
 
         # set up target objects for self.targets:
         for entry in target_list:
+            # print(entry[0].name, entry[1])
             target = Target(_object=entry[0])
-            target.set_epoch(entry[1])
-            target.set_radec(entry[2])
-            target.set_radec_dot(entry[3])
-            target.set_mag(entry[4])
-            target.set_meridian_crossing(entry[5])
-            target.set_t_el(entry[6])
+            target.set_is_observable(entry[1])
+            target.set_meridian_crossing(entry[2])
+            target.set_ephemeris(np.hstack([np.expand_dims(night_grid, 1), entry[3],
+                                            entry[4], entry[5], np.expand_dims(entry[6], 1)]))
+
             self.targets = np.append(self.targets, target)
             # self.targets.append(target)
         # print('targets:', self.targets)
 
-    def target_list_observable(self, day, twilight='nautical', fraction=0.1):
-        """ Check whether targets are observable and return only those
-
-        :param day:
-        :param twilight:
-        :param fraction:
-        :return:
-        """
-        if len(self.targets) == 0:
-            print('no targets in the target list')
-            return
-
-        night, middle_of_night = self.middle_of_night(day)
-        # set constraints (above self.elv_lim deg altitude, Sun altitude < -N deg [dep.on twilight])
-        constraints = [AltitudeConstraint(self.elv_lim * u.deg, 90 * u.deg)]
-        if twilight == 'nautical':
-            constraints.append(AtNightConstraint.twilight_nautical())
-        elif twilight == 'astronomical':
-            constraints.append(AtNightConstraint.twilight_astronomical())
-        elif twilight == 'civil':
-            constraints.append(AtNightConstraint.twilight_civil())
-
-        radec = np.array([_target.radec for _target in self.targets])
-        # print(radec.shape)
-        # tic = _time()
-        coords = SkyCoord(ra=radec[:, 0], dec=radec[:, 1], unit=(u.rad, u.rad), frame='icrs')
-        # print(_time() - tic)
-        tic = _time()
-        table = observability_table(constraints, self.observatory, coords,
-                                    time_range=night, time_grid_resolution=0.25*u.hour)
-        print('observability computation took: {:.2f} s'.format(_time() - tic))
-        # print(table)
-
-        # proceed with observable (for more than 5% of the night) targets only
-        mask_observable = table['fraction of time observable'] > fraction
-        # print(mask_observable)
-
-        target_list_observeable = self.targets[mask_observable]
-        print('total bright asteroids: ', len(self.targets),
-              'observable: ', len(target_list_observeable))
-
-        for tn, target in enumerate(self.targets):
-            self.targets[tn].set_is_observable(True) if mask_observable[tn] \
-                else self.targets[tn].set_is_observable(False)
-
-    def getObsParams(self, target, _mjd, epoch='J2000', output_Vmag=True):
+    def get_obs_params(self, target, _mjd, epoch='J2000', output_Vmag=True):
         """ Compute obs parameters for a given t
 
         :param target: Kepler class object
@@ -2176,10 +1936,10 @@ class TargetListAsteroids(object):
         :return: radec in rad, radec_dot in arcsec/s, Vmag
         """
 
-        AU_DE421 = 1.49597870699626200e+11  # m
-        GSUN = 0.295912208285591100e-03 * AU_DE421**3 / 86400.0**2
+        AU_DE430 = 1.49597870700000000e+11  # m
+        GSUN = 0.295912208285591100e-03 * AU_DE430 ** 3 / 86400.0 ** 2
         # convert AU to m:
-        a = target['a'] * AU_DE421
+        a = target['a'] * AU_DE430
         e = target['e']
         # convert deg to rad:
         i = target['i'] * np.pi / 180.0
@@ -2194,103 +1954,10 @@ class TargetListAsteroids(object):
 
         # jpl_eph - path to eph used by pypride
         radec, radec_dot, Vmag = asteroid.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
-                                                    epoch=epoch, output_Vmag=output_Vmag, _inp=self.inp)
-        #    print(radec.ra.hms, radec.dec.dms, radec_dot, Vmag)
+                                                    epoch=epoch, output_Vmag=output_Vmag,
+                                                    _cat_eop=self.inp['cat_eop'])
 
         return radec, radec_dot, Vmag
-
-    def middle_of_night(self, day):
-        """
-            day - datetime.datetime object, 0h UTC of the coming day
-        """
-        #        day = datetime.datetime(2015,11,7) # for KP, in UTC it is always 'tomorrow'
-        nextDay = day + datetime.timedelta(days=1)
-        astrot = Time([str(day), str(nextDay)], format='iso', scale='utc')
-        # when the night comes, heh?
-        sunSet = self.observatory.sun_set_time(astrot[0])
-        sunRise = self.observatory.sun_rise_time(astrot[1])
-
-        # print(sunSet.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f'),
-        # sunRise.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f'))
-        night = Time([sunSet.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f'),
-                      sunRise.datetime[0].strftime('%Y-%m-%d %H:%M:%S.%f')],
-                     format='iso', scale='utc')
-
-        # build time grid for the night to come
-        time_grid = time_grid_from_range(night)
-        middle_of_night = time_grid[len(time_grid) / 2]
-
-        return night, middle_of_night
-
-    def get_observing_windows(self, day):
-        """
-            Get observing windows for when the targets in the target list are above elv_lim
-        :return:
-        """
-        if len(self.targets) == 0:
-            print('no targets in the target list')
-            return
-
-        # print(self.targets)
-
-        # get night:
-        night, _ = self.middle_of_night(day)
-
-        for tn, target in enumerate(self.targets):
-            if target.is_observable:
-                self.targets[tn].set_observability_windows(night=night, _elv_lim=self.elv_lim)
-
-    def get_guide_stars(self, _guide_star_cat=u'I/337/gaia', _radius=30.0, _margin=30.0, _m_lim_gs=16.0,
-                        _plot_field=False, _psf_fits=None, _display_plot=False, _save_plot=False,
-                        _path_nightly_date='./', parallel=False):
-        """
-            Get astrometric guide stars for each observing window
-        :return:
-        """
-        if len(self.targets) == 0:
-            print('no targets in the target list')
-            return
-
-        if _plot_field and _psf_fits is not None:
-            try:
-                with fits.open(_psf_fits) as hdulist:
-                    model_psf = hdulist[0].data
-            except IOError:
-                # couldn't load? use a simple Gaussian then
-                model_psf = None
-        else:
-            model_psf = None
-
-        if parallel:
-            # FIXME: can't pickle fortran object error :(
-            # targ_args = [self.inp['jpl_eph'], _guide_star_cat, self.observatory_pypride,
-            #              _radius, _margin, _m_lim_gs, _plot_field, model_psf]
-            # args = [[target] + targ_args for target in self.targets]
-            # futures = client.map(target_guide_star_helper, args)
-            # self.targets = client.gather(futures)
-            pass
-        else:
-            for tn, target in enumerate(self.targets):
-                if target.is_observable:
-                    self.targets[tn].set_guide_stars(_jpl_eph=self.inp['jpl_eph'], _guide_star_cat=_guide_star_cat,
-                                           _station=self.sta, _radius=_radius, _margin=_margin,
-                                           _m_lim_gs=_m_lim_gs, _plot_field=_plot_field, _model_psf=model_psf,
-                                           _display_plot=_display_plot, _save_plot=_save_plot,
-                                           _path_nightly_date=_path_nightly_date, _inp=self.inp)
-
-    def make_nightly_json(self, _path_nightly_date='./'):
-
-        json_dict = OrderedDict([tr.to_dict() for tr in self.targets])
-        # print(json_dict)
-
-        # for tr in self.targets:
-        #     print(tr)
-
-        # print(os.path.join(_path_nightly_date, '{:s}.json'.format('bright_objects')))
-        if not os.path.exists(_path_nightly_date):
-            os.makedirs(_path_nightly_date)
-        with open(os.path.join(_path_nightly_date, '{:s}.json'.format('bright_objects')), 'w') as fj:
-            json.dump(json_dict, fj, indent=4)  # sort_keys=True,
 
 
 class AsteroidDatabase(object):
@@ -2742,12 +2409,12 @@ class Asteroid(object):
         return state
 
     @staticmethod
-    def PNmatrix(t, lon_gcen, u, v, _inp):
+    @memoize
+    def PNmatrix(t, lon_gcen, u, v, _cat_eop):
         """
             Compute (geocentric) IAU2000 precession/nutation matrix for epoch
             t -- astropy.time.Time object
         """
-        from pypride.vintlib import taitime, eop_iers, t_eph, ter2cel, load_cats
         # precess to date
         ''' set dates: '''
 
@@ -2760,7 +2427,7 @@ class Asteroid(object):
         TAI, TT = taitime(mjd, UTC)
 
         ''' load cats '''
-        _, _, eops = load_cats(_inp, 'DUMMY', 'S', ['GEOCENTR'], tstamp)
+        eops = load_eops(_cat_eop, tstamp)
 
         ''' interpolate eops to tstamp '''
         UT1, eop_int = eop_iers(mjd, UTC, eops)
@@ -2769,14 +2436,13 @@ class Asteroid(object):
         CT, dTAIdCT = t_eph(JD, UT1, TT, lon_gcen, u, v)
 
         ''' rotation matrix IERS '''
-        r2000 = ter2cel(tstamp, eop_int, dTAIdCT, 'iau2000')
+        r2000 = GTRS_to_GCRS(tstamp, eop_int, dTAIdCT)
         #    print(r2000[:,:,0])
 
         return r2000
 
     # for some reason, jit-compilation of this one slows down the execution significantly!
-    # @jit
-    def raDecVmag(self, mjd, jpl_eph, epoch='J2000', station=None, output_Vmag=False, _inp=None):
+    def raDecVmag(self, mjd, jpl_eph, epoch='J2000', station=None, output_Vmag=False, _cat_eop=None):
         """ Calculate ra/dec's from equatorial state
             Then compute asteroid's expected visual magnitude
 
@@ -2804,7 +2470,7 @@ class Asteroid(object):
 
         # station GCRS position/velocity:
         if station is not None and station.r_GCRS is None:
-            r2000 = self.PNmatrix(Time(mjd, format='mjd'), station.lon_gcen, station.u, station.v, _inp)
+            r2000 = self.PNmatrix(Time(mjd, format='mjd'), station.lon_gcen, station.u, station.v, _cat_eop)
             station.GTRS_to_GCRS(r2000)
 
         # quick and dirty LT computation (but accurate enough for pointing, I hope)
@@ -3019,11 +2685,10 @@ if __name__ == '__main__':
         # NEA or PHA:
         tl = TargetListAsteroids(f_inp, database_source='mpc', database_file=asteroid_database_file,
                                  _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, _date=date)
-        # get all bright targets given m_lim
+        # get all bright targets given m_lim and chech observability given elv_lim, twilight and fraction
         mask = None
-        tl.target_list_all(date, mask, parallel=False, epoch='J2000', output_Vmag=True)
-        # get observable given elv_lim
-        tl.target_list_observable(date, twilight=twilight, fraction=fraction)
+        tl.target_list(date, mask, _parallel=True, _epoch='J2000', _output_Vmag=True, _night_grid_n=40,
+                       _twilight=twilight, _fraction=fraction)
         # get observing windows
         tl.get_observing_windows(date)
         # get guide stars
