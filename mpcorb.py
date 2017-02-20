@@ -39,7 +39,7 @@ def asteroid_database_update(_f_database, _url, n=1.0):
               datetime.datetime.utcfromtimestamp(os.path.getmtime(_f_database))
         if age.days > n:
             do_update = True
-            print('Asteroid database: {:s} is out of date, updating...'.format(_f_database))
+            print('MinorBody database: {:s} is out of date, updating...'.format(_f_database))
     else:
         do_update = True
         print('Database file: {:s} is missing, fetching...'.format(_f_database))

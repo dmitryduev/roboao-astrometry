@@ -721,7 +721,7 @@ def target_list_helper(args):
             observable, meridian_transit, azels = targlist.observability(night_grid, radecs, Vmags,
                                                                          twilight=_twilight, fraction=_fraction)
             # print(asteroid['name'], observable, meridian_transit)
-            return [AsteroidDatabase.init_asteroid(asteroid), observable, meridian_transit,
+            return [MinorBodyDatabase.init_minor_body(asteroid), observable, meridian_transit,
                     radecs, radec_dots, azels, Vmags]
         else:
             return None
@@ -1907,7 +1907,7 @@ class TargetListAsteroids(TargetList):
                 if np.min(Vmags) <= self.m_lim:
                     observable, meridian_transit, azels = self.observability(night_grid, radecs, Vmags,
                                                                              twilight=_twilight, fraction=_fraction)
-                    target_list.append([AsteroidDatabase.init_asteroid(asteroid), observable, meridian_transit,
+                    target_list.append([MinorBodyDatabase.init_minor_body(asteroid), observable, meridian_transit,
                                         radecs, radec_dots, azels, Vmags])
             target_list = np.array(target_list)
             print('serial computation took: {:.2f} s'.format(_time() - ttic))
@@ -1932,7 +1932,9 @@ class TargetListAsteroids(TargetList):
         """ Compute obs parameters for a given t
 
         :param target: Kepler class object
-        :param mjd: epoch in TDB/mjd (t.tdb.mjd, t - astropy.Time object, UTC)
+        :param _mjd: epoch in TDB/mjd (t.tdb.mjd, t - astropy.Time object, UTC)
+        :param epoch: 'J2000', 'Date' or jdate like 2017.0
+        :param output_Vmag: compute Vmag?
         :return: radec in rad, radec_dot in arcsec/s, Vmag
         """
 
@@ -1950,7 +1952,7 @@ class TargetListAsteroids(TargetList):
         H = target['H']
         G = target['G']
 
-        asteroid = Asteroid(target['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
+        asteroid = MinorBody(target['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
 
         # jpl_eph - path to eph used by pypride
         radec, radec_dot, Vmag = asteroid.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
@@ -1960,7 +1962,7 @@ class TargetListAsteroids(TargetList):
         return radec, radec_dot, Vmag
 
 
-class AsteroidDatabase(object):
+class MinorBodyDatabase(object):
 
     def __init__(self):
         self.database = None
@@ -1968,7 +1970,7 @@ class AsteroidDatabase(object):
         self.path_local = None
         self.database_url = None
 
-    def asteroid_database_update(self, n=1.0):
+    def minor_body_database_update(self, n=1.0):
         """
             Fetch an asteroid database update
 
@@ -1983,7 +1985,7 @@ class AsteroidDatabase(object):
                       datetime.datetime.utcfromtimestamp(os.path.getmtime(self.f_database))
                 if age.days > n:
                     do_update = True
-                    print('Asteroid database: {:s} is out of date, updating...'.format(self.f_database))
+                    print('MinorBody database: {:s} is out of date, updating...'.format(self.f_database))
             else:
                 do_update = True
                 print('Database file: {:s} is missing, fetching...'.format(self.f_database))
@@ -1999,26 +2001,26 @@ class AsteroidDatabase(object):
                     pass
 
     @staticmethod
-    def init_asteroid(_asteroid_db_entry):
+    def init_minor_body(_minor_body_db_entry):
         """
-            Initialize Asteroid object from 'raw' db entry
+            Initialize MinorBody object from 'raw' db entry
         """
 
         AU_DE430 = 1.49597870700000000e+11  # m
         GSUN = 0.295912208285591100e-03 * AU_DE430 ** 3 / 86400.0 ** 2
         # convert AU to m:
-        a = _asteroid_db_entry['a'] * AU_DE430
-        e = _asteroid_db_entry['e']
+        a = _minor_body_db_entry['a'] * AU_DE430
+        e = _minor_body_db_entry['e']
         # convert deg to rad:
-        i = _asteroid_db_entry['i'] * np.pi / 180.0
-        w = _asteroid_db_entry['w'] * np.pi / 180.0
-        Node = _asteroid_db_entry['Node'] * np.pi / 180.0
-        M0 = _asteroid_db_entry['M0'] * np.pi / 180.0
-        t0 = _asteroid_db_entry['epoch']
-        H = _asteroid_db_entry['H']
-        G = _asteroid_db_entry['G']
+        i = _minor_body_db_entry['i'] * np.pi / 180.0
+        w = _minor_body_db_entry['w'] * np.pi / 180.0
+        Node = _minor_body_db_entry['Node'] * np.pi / 180.0
+        M0 = _minor_body_db_entry['M0'] * np.pi / 180.0
+        t0 = _minor_body_db_entry['epoch']
+        H = _minor_body_db_entry['H']
+        G = _minor_body_db_entry['G']
 
-        return Asteroid(_asteroid_db_entry['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
+        return MinorBody(_minor_body_db_entry['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
 
     def load(self):
         """
@@ -2030,19 +2032,19 @@ class AsteroidDatabase(object):
     def get_one(self, _name):
         """
             Get one asteroid from database
-        :return: single Asteroid object
+        :return: single MinorBody object
         """
         raise NotImplementedError
 
     def get_all(self):
         """
             Get all asteroids from database
-        :return: list of Asteroid objects
+        :return: list of MinorBody objects
         """
         raise NotImplementedError
 
 
-class AsteroidDatabaseJPL(AsteroidDatabase):
+class AsteroidDatabaseJPL(MinorBodyDatabase):
 
     def __init__(self, _path_local='./', _f_database='ELEMENTS.NUMBR'):
         # initialize super class
@@ -2053,7 +2055,7 @@ class AsteroidDatabaseJPL(AsteroidDatabase):
         self.database_url = os.path.join('http://ssd.jpl.nasa.gov/dat/', _f_database)
 
         # update database if necessary:
-        self.asteroid_database_update(n=1.0)
+        self.minor_body_database_update(n=1.0)
 
     def load(self):
         """
@@ -2081,7 +2083,7 @@ class AsteroidDatabaseJPL(AsteroidDatabase):
     def get_one(self, _name):
         """
             Get one asteroid from database
-        :return: single Asteroid object
+        :return: single MinorBody object
         """
         # remove underscores:
         if '_' in _name:
@@ -2094,9 +2096,9 @@ class AsteroidDatabaseJPL(AsteroidDatabase):
         if self.database is not None:
             try:
                 asteroid_entry = self.database[self.database['name'] == _name]
-                # initialize and return Asteroid object here:
+                # initialize and return MinorBody object here:
                 if len(asteroid_entry) > 0:
-                    return self.init_asteroid(asteroid_entry)
+                    return self.init_minor_body(asteroid_entry)
                 else:
                     return None
 
@@ -2120,8 +2122,8 @@ class AsteroidDatabaseJPL(AsteroidDatabase):
                 # this is for numbered asteroids:
                 asteroid_entry = np.array([((entry[0:25].strip(),) + tuple(map(float, entry[25:].split()[:-2])))],
                                           dtype=dt)
-                # initialize and return Asteroid object here:
-                return self.init_asteroid(asteroid_entry)
+                # initialize and return MinorBody object here:
+                return self.init_minor_body(asteroid_entry)
 
             except Exception as _e:
                 print(_e)
@@ -2131,16 +2133,16 @@ class AsteroidDatabaseJPL(AsteroidDatabase):
     def get_all(self):
         """
             Get all asteroids from database
-        :return: list of Asteroid objects
+        :return: list of MinorBody objects
         """
         if self.database is None:
             self.load()
 
-        asteroids = [self.init_asteroid(asteroid_entry) for asteroid_entry in self.database]
+        asteroids = [self.init_minor_body(asteroid_entry) for asteroid_entry in self.database]
         return asteroids
 
 
-class AsteroidDatabaseMPC(AsteroidDatabase):
+class AsteroidDatabaseMPC(MinorBodyDatabase):
 
     def __init__(self, _path_local='./', _f_database='PHA.txt'):
         super(AsteroidDatabaseMPC, self).__init__()
@@ -2150,7 +2152,7 @@ class AsteroidDatabaseMPC(AsteroidDatabase):
         self.database_url = os.path.join('http://www.minorplanetcenter.net/iau/MPCORB/', _f_database)
 
         # update database if necessary:
-        self.asteroid_database_update(n=0.5)
+        self.minor_body_database_update(n=0.5)
 
     @staticmethod
     def unpack_epoch(epoch_str):
@@ -2220,7 +2222,7 @@ class AsteroidDatabaseMPC(AsteroidDatabase):
     def get_one(self, _name):
         """
             Get one asteroid from database
-        :return: single Asteroid object
+        :return: single MinorBody object
         """
         # remove underscores:
         if '_' in _name:
@@ -2229,9 +2231,9 @@ class AsteroidDatabaseMPC(AsteroidDatabase):
         if self.database is not None:
             try:
                 asteroid_entry = self.database[self.database['name'] == _name]
-                # initialize and return Asteroid object here:
+                # initialize and return MinorBody object here:
                 if len(asteroid_entry) > 0:
-                    return self.init_asteroid(asteroid_entry)
+                    return self.init_minor_body(asteroid_entry)
                 else:
                     return None
 
@@ -2270,8 +2272,8 @@ class AsteroidDatabaseMPC(AsteroidDatabase):
                                          # + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
                                          + (str(entry[137:141]),) + (str(entry[166:194]).strip(),)
                                          + (str(entry[194:202]).strip(),)], dtype=dt)
-                # initialize Asteroid object here:
-                return self.init_asteroid(asteroid_entry)
+                # initialize MinorBody object here:
+                return self.init_minor_body(asteroid_entry)
 
             except Exception as _e:
                 print(_e)
@@ -2281,18 +2283,139 @@ class AsteroidDatabaseMPC(AsteroidDatabase):
     def get_all(self):
         """
             Get all asteroids from database
-        :return: list of Asteroid objects
+        :return: list of MinorBody objects
         """
         if self.database is None:
             self.load()
 
-        asteroids = [self.init_asteroid(asteroid_entry) for asteroid_entry in self.database]
-        return asteroids
+        minor_bodies = [self.init_minor_body(asteroid_entry) for asteroid_entry in self.database]
+        return minor_bodies
 
 
-class Asteroid(object):
+class CometDatabaseMPC(MinorBodyDatabase):
+
+    def __init__(self, _path_local='./', _f_database='CometEls.txt'):
+        super(AsteroidDatabaseMPC, self).__init__()
+
+        self.f_database = _f_database
+        self.path_local = _path_local
+        self.database_url = os.path.join('http://www.minorplanetcenter.net/iau/MPCORB/', _f_database)
+
+        # update database if necessary:
+        self.minor_body_database_update(n=0.5)
+
+    def load(self):
+        """
+            Load database into self.database
+        :return:
+        """
+        with open(os.path.join(self.path_local, self.f_database), 'r') as f:
+            database = f.readlines()
+
+        # remove empty lines:
+        database = [l for l in database if len(l) > 5]
+
+        dt = np.dtype([('designation', '|S21'), ('H', '<f8'), ('G', '<f8'),
+                       ('epoch', '<f8'), ('M0', '<f8'), ('w', '<f8'),
+                       ('Node', '<f8'), ('i', '<f8'), ('e', '<f8'),
+                       ('n', '<f8'), ('a', '<f8'), ('U', '|S21'),
+                       ('n_obs', '<f8'), ('n_opps', '<f8'), ('arc', '|S21'),
+                       ('rms', '|S21'), ('name', '|S21'), ('last_obs', '|S21')
+                       ])
+
+        self.database = np.array([(str(entry[:7]).strip(),)
+                                  + (float(entry[8:13]) if len(entry[8:13].strip()) > 0 else 20.0,)
+                                  + (float(entry[14:19]) if len(entry[14:19].strip()) > 0 else 0.15,)
+                                  + (self.unpack_epoch(str(entry[20:25])),)
+                                  + (float(entry[26:35]),) + (float(entry[37:46]),)
+                                  + (float(entry[48:57]),) + (float(entry[59:68]),) + (float(entry[70:79]),)
+                                  + (float(entry[80:91]) if len(entry[80:91].strip()) > 0 else 0,)
+                                  + (float(entry[92:103]) if len(entry[92:103].strip()) > 0 else 0,)
+                                  + (str(entry[105:106]),)
+                                  + (int(entry[117:122]) if len(entry[117:122].strip()) > 0 else 0,)
+                                  + (int(entry[123:126]) if len(entry[123:126].strip()) > 0 else 0,)
+                                  + (str(entry[127:136]).strip(),)
+                                  # + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
+                                  + (str(entry[137:141]),) + (str(entry[166:194]).strip(),)
+                                  + (str(entry[194:202]).strip(),)
+                                 for entry in database], dtype=dt)
+
+    def get_one(self, _name):
+        """
+            Get one asteroid from database
+        :return: single MinorBody object
+        """
+        # remove underscores:
+        if '_' in _name:
+            _name = ' '.join(_name.split('_'))
+
+        if self.database is not None:
+            try:
+                asteroid_entry = self.database[self.database['name'] == _name]
+                # initialize and return MinorBody object here:
+                if len(asteroid_entry) > 0:
+                    return self.init_minor_body(asteroid_entry)
+                else:
+                    return None
+
+            except Exception as _e:
+                print(_e)
+                traceback.print_exc()
+                return None
+        else:
+            # database not read into memory? access it quickly then:
+            try:
+                # get the entry in question:
+                with open(os.path.join(self.path_local, self.f_database)) as f:
+                    lines = f.readlines()
+                    entry = [line for line in lines if line.find(_name) != -1][0]
+
+                dt = np.dtype([('designation', '|S21'), ('H', '<f8'), ('G', '<f8'),
+                               ('epoch', '<f8'), ('M0', '<f8'), ('w', '<f8'),
+                               ('Node', '<f8'), ('i', '<f8'), ('e', '<f8'),
+                               ('n', '<f8'), ('a', '<f8'), ('U', '|S21'),
+                               ('n_obs', '<f8'), ('n_opps', '<f8'), ('arc', '|S21'),
+                               ('rms', '|S21'), ('name', '|S21'), ('last_obs', '|S21')
+                               ])
+                asteroid_entry = np.array(
+                                        [(str(entry[:7]).strip(),)
+                                         + (float(entry[8:13]) if len(entry[8:13].strip()) > 0 else 20.0,)
+                                         + (float(entry[14:19]) if len(entry[14:19].strip()) > 0 else 0.15,)
+                                         + (self.unpack_epoch(str(entry[20:25])),)
+                                         + (float(entry[26:35]),) + (float(entry[37:46]),)
+                                         + (float(entry[48:57]),) + (float(entry[59:68]),) + (float(entry[70:79]),)
+                                         + (float(entry[80:91]) if len(entry[80:91].strip()) > 0 else 0,)
+                                         + (float(entry[92:103]) if len(entry[92:103].strip()) > 0 else 0,)
+                                         + (str(entry[105:106]),)
+                                         + (int(entry[117:122]) if len(entry[117:122].strip()) > 0 else 0,)
+                                         + (int(entry[123:126]) if len(entry[123:126].strip()) > 0 else 0,)
+                                         + (str(entry[127:136]).strip(),)
+                                         # + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
+                                         + (str(entry[137:141]),) + (str(entry[166:194]).strip(),)
+                                         + (str(entry[194:202]).strip(),)], dtype=dt)
+                # initialize MinorBody object here:
+                return self.init_minor_body(asteroid_entry)
+
+            except Exception as _e:
+                print(_e)
+                traceback.print_exc()
+                return None
+
+    def get_all(self):
+        """
+            Get all asteroids from database
+        :return: list of MinorBody objects
+        """
+        if self.database is None:
+            self.load()
+
+        minor_bodies = [self.init_minor_body(asteroid_entry) for asteroid_entry in self.database]
+        return minor_bodies
+
+
+class MinorBody(object):
     """
-       Class to work with Keplerian orbits of Asteroids
+       Class to work with Keplerian orbits of Minor Bodies
     """
 
     def __init__(self, name, a, e, i, w, Node, M0, GM, t0, H=None, G=None):
