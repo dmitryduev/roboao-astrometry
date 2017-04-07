@@ -90,11 +90,10 @@ if __name__ == '__main__':
 
     tl = TargetListAsteroids(f_inp, database_source='mpc', database_file=database_file,
                              _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, _date=date)
-    # get all bright targets given m_lim
+    # get all bright targets given m_lim and check observability given elv_lim, twilight and fraction
     mask = None
-    tl.target_list_all(date, mask, parallel=True, epoch='J2000', output_Vmag=True)
-    # get observable given elv_lim
-    tl.target_list_observable(date, twilight=twilight, fraction=fraction)
+    tl.target_list(date, mask, _parallel=True, _epoch='J2000', _output_Vmag=True, _night_grid_n=40,
+                   _twilight=twilight, _fraction=fraction)
 
     for a in tl.targets:
         print(a)

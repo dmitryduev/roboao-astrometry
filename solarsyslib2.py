@@ -1865,7 +1865,7 @@ class TargetListAsteroids(TargetList):
             from self.database
         """
         # get middle of night:
-        night, night_grid = self.get_night(date, _night_grid_n)
+        night, night_grid = self.get_night(_date, _night_grid_n)
         mjds = night_grid.tdb.mjd  # in TDB!!
 
         # iterate over asteroids:
@@ -1919,7 +1919,8 @@ class TargetListAsteroids(TargetList):
             print('serial computation took: {:.2f} s'.format(_time() - ttic))
 
         print('Total targets brighter than {:.1f}: {:d}'.format(self.m_lim, target_list.shape[0]))
-        print('Total observable targets: {:d}'.format(np.count_nonzero(target_list[:, 1])))
+        if target_list.shape[0] > 0:
+            print('Total observable targets: {:d}'.format(np.count_nonzero(target_list[:, 1])))
 
         # set up target objects for self.targets:
         for entry in target_list:
@@ -1958,7 +1959,7 @@ class TargetListAsteroids(TargetList):
         H = target['H']
         G = target['G']
 
-        asteroid = MinorBody(target['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
+        asteroid = MinorBody(target['name'], a=a, e=e, i=i, w=w, Node=Node, M0=M0, GM=GSUN, t0=t0, H=H, G=G)
 
         # jpl_eph - path to eph used by pypride
         radec, radec_dot, Vmag = asteroid.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
@@ -1988,7 +1989,7 @@ class TargetListComets(TargetList):
             from self.database
         """
         # get middle of night:
-        night, night_grid = self.get_night(date, _night_grid_n)
+        night, night_grid = self.get_night(_date, _night_grid_n)
         mjds = night_grid.tdb.mjd  # in TDB!!
 
         # iterate over asteroids:
@@ -2004,8 +2005,8 @@ class TargetListComets(TargetList):
             pool = multiprocessing.Pool(n_cpu)
             # asynchronously apply target_list_helper
             database_masked = self.database[_mask]
-            args = [(self, asteroid, mjds, _epoch, _output_Vmag, night_grid, _twilight, _fraction)
-                    for asteroid in database_masked]
+            args = [(self, comet, mjds, _epoch, _output_Vmag, night_grid, _twilight, _fraction)
+                    for comet in database_masked]
             result = pool.map_async(target_list_helper, args)
             # close bassejn
             pool.close()  # we are not adding any more processes
@@ -2017,13 +2018,13 @@ class TargetListComets(TargetList):
             print('parallel computation took: {:.2f} s'.format(_time() - ttic))
         else:
             ttic = _time()
-            for ia, asteroid in enumerate(self.database[_mask]):
-                print(asteroid['name'])
+            for ia, comet in enumerate(self.database[_mask]):
+                print(comet['name'])
                 tic = _time()
                 # target can move fast, so compute radec/dots on a grid for the whole night
                 radecs, radec_dots, Vmags = [], [], []
                 for mjd in mjds:
-                    radec, radec_dot, Vmag = self.get_obs_params(asteroid, mjd, _epoch, _output_Vmag)
+                    radec, radec_dot, Vmag = self.get_obs_params(comet, mjd, _epoch, _output_Vmag)
                     radecs.append(radec)
                     radec_dots.append(radec_dot)
                     Vmags.append(Vmag)
@@ -2036,13 +2037,14 @@ class TargetListComets(TargetList):
                 if np.min(Vmags) <= self.m_lim:
                     observable, meridian_transit, azels = self.observability(night_grid, radecs, Vmags,
                                                                              twilight=_twilight, fraction=_fraction)
-                    target_list.append([MinorBodyDatabase.init_minor_body(asteroid), observable, meridian_transit,
+                    target_list.append([MinorBodyDatabase.init_minor_body(comet), observable, meridian_transit,
                                         radecs, radec_dots, azels, Vmags])
             target_list = np.array(target_list)
             print('serial computation took: {:.2f} s'.format(_time() - ttic))
 
         print('Total targets brighter than {:.1f}: {:d}'.format(self.m_lim, target_list.shape[0]))
-        print('Total observable targets: {:d}'.format(np.count_nonzero(target_list[:, 1])))
+        if target_list.shape[0] > 0:
+            print('Total observable targets: {:d}'.format(np.count_nonzero(target_list[:, 1])))
 
         # set up target objects for self.targets:
         for entry in target_list:
@@ -2070,23 +2072,22 @@ class TargetListComets(TargetList):
         AU_DE430 = 1.49597870700000000e+11  # m
         GSUN = 0.295912208285591100e-03 * AU_DE430 ** 3 / 86400.0 ** 2
         # convert AU to m:
-        a = target['a'] * AU_DE430
+        q = target['q'] * AU_DE430
         e = target['e']
         # convert deg to rad:
         i = target['i'] * np.pi / 180.0
         w = target['w'] * np.pi / 180.0
         Node = target['Node'] * np.pi / 180.0
-        M0 = target['M0'] * np.pi / 180.0
         t0 = target['epoch']
+        tau = target['tau']
         H = target['H']
         G = target['G']
 
-        asteroid = MinorBody(target['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
+        comet = MinorBody(target['name'], q=q, e=e, i=i, w=w, Node=Node, tau=tau, GM=GSUN, t0=t0, H=H, G=G)
 
         # jpl_eph - path to eph used by pypride
-        radec, radec_dot, Vmag = asteroid.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
-                                                    epoch=epoch, output_Vmag=output_Vmag,
-                                                    _cat_eop=self.inp['cat_eop'])
+        radec, radec_dot, Vmag = comet.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
+                                                epoch=epoch, output_Vmag=output_Vmag, _cat_eop=self.inp['cat_eop'])
 
         return radec, radec_dot, Vmag
 
@@ -2134,22 +2135,26 @@ class MinorBodyDatabase(object):
         """
             Initialize MinorBody object from 'raw' db entry
         """
+        _kep_el = _minor_body_db_entry.dtype.names
 
         AU_DE430 = 1.49597870700000000e+11  # m
         GSUN = 0.295912208285591100e-03 * AU_DE430 ** 3 / 86400.0 ** 2
         # convert AU to m:
-        a = _minor_body_db_entry['a'] * AU_DE430
+        a = _minor_body_db_entry['a'] * AU_DE430 if 'a' in _kep_el else None
+        q = _minor_body_db_entry['q'] * AU_DE430 if 'q' in _kep_el else None
         e = _minor_body_db_entry['e']
         # convert deg to rad:
         i = _minor_body_db_entry['i'] * np.pi / 180.0
         w = _minor_body_db_entry['w'] * np.pi / 180.0
         Node = _minor_body_db_entry['Node'] * np.pi / 180.0
-        M0 = _minor_body_db_entry['M0'] * np.pi / 180.0
+        M0 = _minor_body_db_entry['M0'] * np.pi / 180.0 if 'M0' in _kep_el else None
+        tau = _minor_body_db_entry['tau'] * np.pi / 180.0 if 'tau' in _kep_el else None
         t0 = _minor_body_db_entry['epoch']
         H = _minor_body_db_entry['H']
         G = _minor_body_db_entry['G']
 
-        return MinorBody(_minor_body_db_entry['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
+        return MinorBody(_minor_body_db_entry['name'], a=a, q=q, e=e, i=i, w=w, Node=Node,
+                         M0=M0, GM=GSUN, t0=t0, H=H, G=G)
 
     def load(self):
         """
@@ -2445,9 +2450,9 @@ class CometDatabaseMPC(MinorBodyDatabase):
         database = [l.replace('\t', ' ') for l in database if len(l) > 5]
 
         dt = np.dtype([('name', '|S21'), ('year_per_pass', '<i8'), ('month_per_pass', '<i8'),
-                       ('day_per_pass', '<f8'), ('q', '<f8'), ('e', '<f8'),
+                       ('day_per_pass', '<f8'), ('tau', '<f8'), ('q', '<f8'), ('e', '<f8'),
                        ('w', '<f8'), ('Node', '<f8'), ('i', '<f8'),
-                       ('solution_epoch', '|S21'), ('H', '<f8'), ('G', '<f8'),
+                       ('epoch', '<f8'), ('H', '<f8'), ('G', '<f8'),
                        ('designation', '|S21'), ('reference', '|S21')
                        ])
 
@@ -2457,24 +2462,28 @@ class CometDatabaseMPC(MinorBodyDatabase):
             _year_per_pass = int(entry[14:19])
             _month_per_pass = int(entry[19:21])
             _day_per_pass = float(entry[21:28])
+            _tau = mjuliandate(_year_per_pass, _month_per_pass, _day_per_pass)
             _q = float(entry[30:39])
             _e = float(entry[41:49])
             _w = float(entry[51:59])
             _Node = float(entry[61:69])
             _i = float(entry[71:79])
-            _solution_epoch = str(entry[81:89])
+            _solution_epoch = datetime.datetime.strptime(str(entry[81:89]), '%Y%m%d') \
+                if len(str(entry[81:89].strip())) > 0 else datetime.datetime(_year_per_pass,
+                                                                             _month_per_pass,
+                                                                             int(_day_per_pass))
+            _epoch = Time(_solution_epoch.strftime('%Y-%m-%d %H:%M:%S.%f'), format='iso', scale='tt').mjd
             _H = float(entry[91:95])
             _G = float(entry[96:100])
             _designation = str(entry[102:158].strip())
             _reference = str(entry[159:188].strip())
-            print(_name, _year_per_pass, _month_per_pass, _day_per_pass, _q, _e, _w, _Node,
-                  _i, _solution_epoch, _H, _G, _designation, _reference)
+            # print(_name, _year_per_pass, _month_per_pass, _day_per_pass, _q, _e, _w, _Node,
+            #       _i, _solution_epoch, _epoch, _H, _G, _designation, _reference)
             # raw_input()
 
-            self.database.append([(_name,) + (_year_per_pass,) + (_month_per_pass,) +
-                                  (_day_per_pass,) + (_q,) + (_e,) + (_w,) + (_Node,) +
-                                  (_i,) + (_solution_epoch,) + (_H,) + (_G,) +
-                                  (_designation,) + (_reference,)])
+            self.database.append((_name, _year_per_pass, _month_per_pass,
+                                  _day_per_pass, _tau, _q, _e, _w, _Node,
+                                  _i, _epoch, _H, _G, _designation, _reference))
 
         self.database = np.array(self.database, dtype=dt)
         # print(self.database)
@@ -2510,29 +2519,33 @@ class CometDatabaseMPC(MinorBodyDatabase):
                     lines = f.readlines()
                     entry = [line for line in lines if line.find(_name) != -1][0]
 
-                dt = np.dtype([('designation', '|S21'), ('H', '<f8'), ('G', '<f8'),
-                               ('epoch', '<f8'), ('M0', '<f8'), ('w', '<f8'),
-                               ('Node', '<f8'), ('i', '<f8'), ('e', '<f8'),
-                               ('n', '<f8'), ('a', '<f8'), ('U', '|S21'),
-                               ('n_obs', '<f8'), ('n_opps', '<f8'), ('arc', '|S21'),
-                               ('rms', '|S21'), ('name', '|S21'), ('last_obs', '|S21')
+                dt = np.dtype([('name', '|S21'), ('year_per_pass', '<i8'), ('month_per_pass', '<i8'),
+                               ('day_per_pass', '<f8'), ('tau', '<f8'), ('q', '<f8'), ('e', '<f8'),
+                               ('w', '<f8'), ('Node', '<f8'), ('i', '<f8'),
+                               ('epoch', '<f8'), ('H', '<f8'), ('G', '<f8'),
+                               ('designation', '|S21'), ('reference', '|S21')
                                ])
-                asteroid_entry = np.array(
-                                        [(str(entry[:7]).strip(),)
-                                         + (float(entry[8:13]) if len(entry[8:13].strip()) > 0 else 20.0,)
-                                         + (float(entry[14:19]) if len(entry[14:19].strip()) > 0 else 0.15,)
-                                         + (self.unpack_epoch(str(entry[20:25])),)
-                                         + (float(entry[26:35]),) + (float(entry[37:46]),)
-                                         + (float(entry[48:57]),) + (float(entry[59:68]),) + (float(entry[70:79]),)
-                                         + (float(entry[80:91]) if len(entry[80:91].strip()) > 0 else 0,)
-                                         + (float(entry[92:103]) if len(entry[92:103].strip()) > 0 else 0,)
-                                         + (str(entry[105:106]),)
-                                         + (int(entry[117:122]) if len(entry[117:122].strip()) > 0 else 0,)
-                                         + (int(entry[123:126]) if len(entry[123:126].strip()) > 0 else 0,)
-                                         + (str(entry[127:136]).strip(),)
-                                         # + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
-                                         + (str(entry[137:141]),) + (str(entry[166:194]).strip(),)
-                                         + (str(entry[194:202]).strip(),)], dtype=dt)
+
+                _name = str(entry[:14]).strip().replace(' ', '')
+                _year_per_pass = int(entry[14:19])
+                _month_per_pass = int(entry[19:21])
+                _day_per_pass = float(entry[21:28])
+                _tau = mjuliandate(_year_per_pass, _month_per_pass, _day_per_pass)
+                _q = float(entry[30:39])
+                _e = float(entry[41:49])
+                _w = float(entry[51:59])
+                _Node = float(entry[61:69])
+                _i = float(entry[71:79])
+                _solution_epoch = datetime.datetime.strptime(str(entry[81:89]), '%Y%m%d')
+                _epoch = Time(_solution_epoch.strftime('%Y-%m-%d %H:%M:%S.%f'), format='iso', scale='tt').mjd
+                _H = float(entry[91:95])
+                _G = float(entry[96:100])
+                _designation = str(entry[102:158].strip())
+                _reference = str(entry[159:188].strip())
+
+                asteroid_entry = np.array((_name, _year_per_pass, _month_per_pass,
+                                           _day_per_pass, _tau, _q, _e, _w, _Node,
+                                           _i, _epoch, _H, _G, _designation, _reference), dtype=dt)
                 # initialize MinorBody object here:
                 return self.init_minor_body(asteroid_entry)
 
@@ -2558,52 +2571,108 @@ class MinorBody(object):
        Class to work with Keplerian orbits of Minor Bodies
     """
 
-    def __init__(self, name, a, e, i, w, Node, M0, GM, t0, H=None, G=None):
+    def __init__(self, name, e, i, w, Node, GM, t0, a=None, M0=None, q=None, tau=None, H=None, G=None):
+        """
+        
+        :param name: 
+        :param e: 
+        :param i: 
+        :param w: 
+        :param Node: 
+        :param GM: 
+        :param t0: 
+        :param a: 
+        :param M0:
+        :param q:
+        :param tau: 
+        :param H: 
+        :param G:
+         
+            For asteroids, a and M0 are given
+            For comets, q and tau are given
+        """
         # a should be in metres, all the angles - in radians, t0 in mjd [days]
         # GM = G*(M_central_body + M_body) for 2 body problem
         # GM = G*M_central_body**3/ (M_central_body + M_body)**2
         #                   for restricted 3 body problem
         # GM = [m**2/kg/s**2]
         self.name = name
-        self.a = float(a)
         self.e = float(e)
         self.i = float(i)
         self.w = float(w)
         self.Node = float(Node)
-        self.M0 = float(M0)
+        self.a = float(a) if a is not None else None
+        self.M0 = float(M0) if M0 is not None else None
+        self.q = float(q) if q is not None else None
+        self.tau = float(tau) if tau is not None else None
         self.GM = float(GM)
         self.t0 = float(t0)
         self.H = float(H)
         self.G = float(G)
 
+        print(name, e, i, w, Node, GM, t0, a, M0, q, tau, H, G)
+
     def __str__(self):
         """
             Print it out nicely
         """
-        return '<Keplerian object {:s}: a={:e} m, e={:f}, i={:f} rad, '. \
-                   format(self.name, self.a, self.e, self.i) + \
-               'w={:f} rad, Node={:f} rad, M0={:f} rad, '. \
-                   format(self.w, self.Node, self.M0) + \
-               't0={:f} (MJD), GM={:e} m**3/kg/s**2>'. \
-                   format(self.t0, self.GM)
+        if self.a is not None:
+            return '<Keplerian object {:s}: a={:e} m, e={:f}, i={:f} rad, '. \
+                       format(self.name, self.a, self.e, self.i) + \
+                   'w={:f} rad, Node={:f} rad, M0={:f} rad, '. \
+                       format(self.w, self.Node, self.M0) + \
+                   't0={:f} (MJD), GM={:e} m**3/kg/s**2>'. \
+                       format(self.t0, self.GM)
+        else:
+            return '<Keplerian object {:s}: q={:e} m, e={:f}, i={:f} rad, '. \
+                       format(self.name, self.q, self.e, self.i) + \
+                   'w={:f} rad, Node={:f} rad, tau={:f} (MJD), '. \
+                       format(self.w, self.Node, self.tau) + \
+                   't0={:f} (MJD), GM={:e} m**3/kg/s**2>'. \
+                       format(self.t0, self.GM)
 
     @staticmethod
     @jit
-    def kepler(e, M):
-        """ Solve Kepler's equation
+    def kepler(e, M, max_iter=10):
+        """ Solve Kepler's equation for elliptical motion
 
         :param e: eccentricity
         :param M: mean anomaly, rad
         :return:
         """
         E = deepcopy(M)
-        tmp = 1
+        tmp = 1e5
+        n_iter = 1
 
-        while np.abs(E - tmp) > 1e-9:
+        while (np.abs(E - tmp) > 1e-9) or (n_iter <= max_iter):
             tmp = deepcopy(E)
             E += (M - E + e * np.sin(E)) / (1 - e * np.cos(E))
+            n_iter += 1
 
         return E
+
+    @staticmethod
+    @jit
+    def kepler_hyp(e, M, max_iter=10):
+        """ Solve Kepler's equation for hiperbolic motion
+
+        :param e: eccentricity
+        :param M: mean anomaly, rad
+        :return:
+        """
+        H = deepcopy(M)
+        Q = (H + M) / e
+        tmp_H = 1e5
+        tmp_Q = 1e5
+        n_iter = 1
+
+        while ((np.abs(H - tmp_H) > 1e-9) and (np.abs(Q - tmp_Q) > 1e-9)) or (n_iter <= max_iter):
+            tmp = deepcopy(H)
+            H = np.log(np.sqrt(Q**2 + 1) + Q)
+            Q = (H + M) / e
+            n_iter += 1
+
+        return H
 
     @jit
     def to_cart(self, t):
@@ -2612,21 +2681,61 @@ class MinorBody(object):
             from Keplerian elements
             t -- epoch in mjd [decimal days]
         """
-        # mean motion:
-        n = np.sqrt(self.GM / self.a / self.a / self.a) * 86400.0  # [rad/day]
-        # mean anomaly at t:
-        M = n * (t - self.t0) + self.M0
-        #        print(np.fmod(M, 2*np.pi))
-        # solve Kepler equation, get eccentric anomaly:
-        E = self.kepler(self.e, M)
-        cosE = np.cos(E)
-        sinE = np.sin(E)
-        # get true anomaly and distance from focus:
-        sinv = np.sqrt(1.0 - self.e ** 2) * sinE / (1.0 - self.e * cosE)
-        cosv = (cosE - self.e) / (1.0 - self.e * cosE)
-        r = self.a * (1.0 - self.e ** 2) / (1.0 + self.e * cosv)
-        #        r = self.a*(1 - self.e*cosE)
-        #
+        if (0.0 < self.e < 1) and (self.a is not None):
+            ''' elliptical motion: '''
+            # mean motion:
+            n = np.sqrt(self.GM / self.a / self.a / self.a) * 86400.0  # [rad/day]
+            # mean anomaly at t:
+            M = n * (t - self.t0) + self.M0
+            #        print(np.fmod(M, 2*np.pi))
+            # solve Kepler equation, get eccentric anomaly:
+            E = self.kepler(self.e, M)
+            cosE = np.cos(E)
+            sinE = np.sin(E)
+            # get true anomaly and distance from focus:
+            sinv = np.sqrt(1.0 - self.e ** 2) * sinE / (1.0 - self.e * cosE)
+            cosv = (cosE - self.e) / (1.0 - self.e * cosE)
+            r = self.a * (1.0 - self.e ** 2) / (1.0 + self.e * cosv)
+            #        r = self.a*(1 - self.e*cosE)
+
+        elif (self.e == 1.0) and (self.q is not None):  # to machine precision
+            ''' parabolic motion '''
+            # mean motion:
+            n = np.sqrt(self.GM / (2.0 * self.q))
+            # focal parameter:
+            p = (4.0*self.GM / (n**2))**(1.0/3.0)
+            # mean anomaly at t given pericenter passage epoch:
+            M = n * (t - self.tau)
+            Q = 2.0/3.0 * M
+            R = (np.sqrt(1.0 + Q**2) + np.abs(Q))**(2.0/3.0)
+            S = 3.0 * M / (R + 1.0 + 1.0/R)
+            # get true anomaly and distance from focus:
+            sinv = 2.0 * S / (1.0 + S ** 2)
+            cosv = (1.0 - S ** 2) / (1.0 + S ** 2)
+            r = p*(1 + cosv)
+            # r = p*(1.0 + S**2) / 2
+
+        elif (self.e > 1.0) and (self.q is not None):
+            ''' hyperbolic motion '''
+            # real semi axis
+            a = self.q / (self.e - 1.0)
+            # mean motion:
+            n = np.sqrt(self.GM / a / a / a) * 86400.0  # [rad/day]
+            # mean anomaly at t given pericenter passage epoch:
+            M = n * (t - self.tau)
+            # solve Kepler equation's analogue
+            H = self.kepler_hyp(self.e, M)
+            coshH = np.cosh(H)
+            sinhH = np.sinh(H)
+            # get true anomaly and distance from focus:
+            sinv = np.sqrt(self.e ** 2 - 1.0) * sinhH / (self.e * coshH - 1.0)
+            cosv = (self.e - coshH) / (self.e * coshH - 1.0)
+            r = self.a * (self.e ** 2 - 1.0) / (1.0 + self.e * cosv)
+            # r = self.a*(self.e*coshH - 1.0)
+
+        else:
+            raise Exception('Bad set of Keplerian elements, cannot proceed: {:s}'.format(self.name))
+
         sinw = np.sin(self.w)
         cosw = np.cos(self.w)
         sinu = sinw * cosv + cosw * sinv
@@ -2948,7 +3057,7 @@ if __name__ == '__main__':
         # NEA or PHA:
         tl = TargetListAsteroids(f_inp, database_source='mpc', database_file=asteroid_database_file,
                                  _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, _date=date)
-        # get all bright targets given m_lim and chech observability given elv_lim, twilight and fraction
+        # get all bright targets given m_lim and check observability given elv_lim, twilight and fraction
         mask = None
         tl.target_list(date, mask, _parallel=True, _epoch='J2000', _output_Vmag=True, _night_grid_n=40,
                        _twilight=twilight, _fraction=fraction)
