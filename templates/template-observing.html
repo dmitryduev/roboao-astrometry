@@ -208,7 +208,7 @@
                                                     <td style="border-right: solid 1px #DDDDDD;"
                                                                name="object_name"
                                                             {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ object }}</td>
-                                                    {% for key in ('magnitude', 'mean_epoch')%}
+                                                    {% for key in ('mean_magnitude', 'mean_epoch')%}
                                                         <td style="border-right: solid 1px #DDDDDD;"
                                                             name="{{ key }}"
                                                         {% if num_gs %}rowspan="{{ num_gs }}"{% endif %}>{{ data[asteroid_class][object][key] }}</td>

@@ -41,7 +41,10 @@ import gc
 import warnings
 
 import matplotlib
-matplotlib.use('Qt5Agg')
+# to display stuff internally:
+# matplotlib.use('Qt5Agg')
+# to run externally without X-server:
+matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
 import aplpy
@@ -1496,7 +1499,10 @@ class TargetList(object):
             if database_file is None:
                 db = AsteroidDatabaseMPC()
             else:
-                db = AsteroidDatabaseMPC(_f_database=database_file)
+                if database_file != 'CometEls.txt':
+                    db = AsteroidDatabaseMPC(_f_database=database_file)
+                else:
+                    db = CometDatabaseMPC(_f_database=database_file)
         elif database_source == 'jpl':
             if database_file is None:
                 db = AsteroidDatabaseJPL()
@@ -1962,6 +1968,129 @@ class TargetListAsteroids(TargetList):
         return radec, radec_dot, Vmag
 
 
+class TargetListComets(TargetList):
+    """
+        Produce (nightly) target list for the comets project
+    """
+
+    def __init__(self, _f_inp, database_source='mpc', database_file='CometEls.txt', _observatory='kpno',
+                 _m_lim=16.0, _elv_lim=40.0, _date=None, timezone='America/Phoenix'):
+
+        # simply init super class
+        TargetList.__init__(self, _f_inp=_f_inp, database_source=database_source, database_file=database_file,
+                            _observatory=_observatory, _m_lim=_m_lim, _elv_lim=_elv_lim,
+                            _date=_date, timezone=timezone)
+
+    def target_list(self, _date, _mask=None, _parallel=False, _epoch='J2000',
+                    _output_Vmag=True, _night_grid_n=50, _twilight='nautical', _fraction=0.1):
+        """
+            Get observational parameters for a (masked) target list
+            from self.database
+        """
+        # get middle of night:
+        night, night_grid = self.get_night(date, _night_grid_n)
+        mjds = night_grid.tdb.mjd  # in TDB!!
+
+        # iterate over asteroids:
+        target_list = []
+        if _mask is None:
+            _mask = range(0, len(self.database))
+
+        # do it in parallel
+        if _parallel:
+            ttic = _time()
+            n_cpu = multiprocessing.cpu_count()
+            # create pool
+            pool = multiprocessing.Pool(n_cpu)
+            # asynchronously apply target_list_helper
+            database_masked = self.database[_mask]
+            args = [(self, asteroid, mjds, _epoch, _output_Vmag, night_grid, _twilight, _fraction)
+                    for asteroid in database_masked]
+            result = pool.map_async(target_list_helper, args)
+            # close bassejn
+            pool.close()  # we are not adding any more processes
+            pool.join()  # wait until all threads are done before going on
+            # get the ordered results
+            targets_all = result.get()
+            target_list = [_t for _t in targets_all if _t is not None]
+            target_list = np.array(target_list)
+            print('parallel computation took: {:.2f} s'.format(_time() - ttic))
+        else:
+            ttic = _time()
+            for ia, asteroid in enumerate(self.database[_mask]):
+                print(asteroid['name'])
+                tic = _time()
+                # target can move fast, so compute radec/dots on a grid for the whole night
+                radecs, radec_dots, Vmags = [], [], []
+                for mjd in mjds:
+                    radec, radec_dot, Vmag = self.get_obs_params(asteroid, mjd, _epoch, _output_Vmag)
+                    radecs.append(radec)
+                    radec_dots.append(radec_dot)
+                    Vmags.append(Vmag)
+                radecs = np.array(radecs)
+                radec_dots = np.array(radec_dots)
+                Vmags = np.array(Vmags)
+
+                print(len(self.database)-ia, _time() - tic)
+                # skip if too dim
+                if np.min(Vmags) <= self.m_lim:
+                    observable, meridian_transit, azels = self.observability(night_grid, radecs, Vmags,
+                                                                             twilight=_twilight, fraction=_fraction)
+                    target_list.append([MinorBodyDatabase.init_minor_body(asteroid), observable, meridian_transit,
+                                        radecs, radec_dots, azels, Vmags])
+            target_list = np.array(target_list)
+            print('serial computation took: {:.2f} s'.format(_time() - ttic))
+
+        print('Total targets brighter than {:.1f}: {:d}'.format(self.m_lim, target_list.shape[0]))
+        print('Total observable targets: {:d}'.format(np.count_nonzero(target_list[:, 1])))
+
+        # set up target objects for self.targets:
+        for entry in target_list:
+            # print(entry[0].name, entry[1])
+            target = Target(_object=entry[0])
+            target.set_is_observable(entry[1])
+            target.set_meridian_crossing(entry[2])
+            target.set_ephemeris(np.hstack([np.expand_dims(night_grid, 1), entry[3],
+                                            entry[4], entry[5], np.expand_dims(entry[6], 1)]))
+
+            self.targets = np.append(self.targets, target)
+            # self.targets.append(target)
+        # print('targets:', self.targets)
+
+    def get_obs_params(self, target, _mjd, epoch='J2000', output_Vmag=True):
+        """ Compute obs parameters for a given t
+
+        :param target: Kepler class object
+        :param _mjd: epoch in TDB/mjd (t.tdb.mjd, t - astropy.Time object, UTC)
+        :param epoch: 'J2000', 'Date' or jdate like 2017.0
+        :param output_Vmag: compute Vmag?
+        :return: radec in rad, radec_dot in arcsec/s, Vmag
+        """
+
+        AU_DE430 = 1.49597870700000000e+11  # m
+        GSUN = 0.295912208285591100e-03 * AU_DE430 ** 3 / 86400.0 ** 2
+        # convert AU to m:
+        a = target['a'] * AU_DE430
+        e = target['e']
+        # convert deg to rad:
+        i = target['i'] * np.pi / 180.0
+        w = target['w'] * np.pi / 180.0
+        Node = target['Node'] * np.pi / 180.0
+        M0 = target['M0'] * np.pi / 180.0
+        t0 = target['epoch']
+        H = target['H']
+        G = target['G']
+
+        asteroid = MinorBody(target['name'], a, e, i, w, Node, M0, GSUN, t0, H, G)
+
+        # jpl_eph - path to eph used by pypride
+        radec, radec_dot, Vmag = asteroid.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
+                                                    epoch=epoch, output_Vmag=output_Vmag,
+                                                    _cat_eop=self.inp['cat_eop'])
+
+        return radec, radec_dot, Vmag
+
+
 class MinorBodyDatabase(object):
 
     def __init__(self):
@@ -2295,7 +2424,7 @@ class AsteroidDatabaseMPC(MinorBodyDatabase):
 class CometDatabaseMPC(MinorBodyDatabase):
 
     def __init__(self, _path_local='./', _f_database='CometEls.txt'):
-        super(AsteroidDatabaseMPC, self).__init__()
+        super(MinorBodyDatabase, self).__init__()
 
         self.f_database = _f_database
         self.path_local = _path_local
@@ -2313,32 +2442,43 @@ class CometDatabaseMPC(MinorBodyDatabase):
             database = f.readlines()
 
         # remove empty lines:
-        database = [l for l in database if len(l) > 5]
+        database = [l.replace('\t', ' ') for l in database if len(l) > 5]
 
-        dt = np.dtype([('designation', '|S21'), ('H', '<f8'), ('G', '<f8'),
-                       ('epoch', '<f8'), ('M0', '<f8'), ('w', '<f8'),
-                       ('Node', '<f8'), ('i', '<f8'), ('e', '<f8'),
-                       ('n', '<f8'), ('a', '<f8'), ('U', '|S21'),
-                       ('n_obs', '<f8'), ('n_opps', '<f8'), ('arc', '|S21'),
-                       ('rms', '|S21'), ('name', '|S21'), ('last_obs', '|S21')
+        dt = np.dtype([('name', '|S21'), ('year_per_pass', '<i8'), ('month_per_pass', '<i8'),
+                       ('day_per_pass', '<f8'), ('q', '<f8'), ('e', '<f8'),
+                       ('w', '<f8'), ('Node', '<f8'), ('i', '<f8'),
+                       ('solution_epoch', '|S21'), ('H', '<f8'), ('G', '<f8'),
+                       ('designation', '|S21'), ('reference', '|S21')
                        ])
 
-        self.database = np.array([(str(entry[:7]).strip(),)
-                                  + (float(entry[8:13]) if len(entry[8:13].strip()) > 0 else 20.0,)
-                                  + (float(entry[14:19]) if len(entry[14:19].strip()) > 0 else 0.15,)
-                                  + (self.unpack_epoch(str(entry[20:25])),)
-                                  + (float(entry[26:35]),) + (float(entry[37:46]),)
-                                  + (float(entry[48:57]),) + (float(entry[59:68]),) + (float(entry[70:79]),)
-                                  + (float(entry[80:91]) if len(entry[80:91].strip()) > 0 else 0,)
-                                  + (float(entry[92:103]) if len(entry[92:103].strip()) > 0 else 0,)
-                                  + (str(entry[105:106]),)
-                                  + (int(entry[117:122]) if len(entry[117:122].strip()) > 0 else 0,)
-                                  + (int(entry[123:126]) if len(entry[123:126].strip()) > 0 else 0,)
-                                  + (str(entry[127:136]).strip(),)
-                                  # + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
-                                  + (str(entry[137:141]),) + (str(entry[166:194]).strip(),)
-                                  + (str(entry[194:202]).strip(),)
-                                 for entry in database], dtype=dt)
+        self.database = []
+        for entry in database:
+            _name = str(entry[:14]).strip().replace(' ', '')
+            _year_per_pass = int(entry[14:19])
+            _month_per_pass = int(entry[19:21])
+            _day_per_pass = float(entry[21:28])
+            _q = float(entry[30:39])
+            _e = float(entry[41:49])
+            _w = float(entry[51:59])
+            _Node = float(entry[61:69])
+            _i = float(entry[71:79])
+            _solution_epoch = str(entry[81:89])
+            _H = float(entry[91:95])
+            _G = float(entry[96:100])
+            _designation = str(entry[102:158].strip())
+            _reference = str(entry[159:188].strip())
+            print(_name, _year_per_pass, _month_per_pass, _day_per_pass, _q, _e, _w, _Node,
+                  _i, _solution_epoch, _H, _G, _designation, _reference)
+            # raw_input()
+
+            self.database.append([(_name,) + (_year_per_pass,) + (_month_per_pass,) +
+                                  (_day_per_pass,) + (_q,) + (_e,) + (_w,) + (_Node,) +
+                                  (_i,) + (_solution_epoch,) + (_H,) + (_G,) +
+                                  (_designation,) + (_reference,)])
+
+        self.database = np.array(self.database, dtype=dt)
+        # print(self.database)
+        # raw_input()
 
     def get_one(self, _name):
         """

@@ -795,15 +795,15 @@ if __name__ == '__main__':
         # asteroid database:
         path_to_database = config.get('Path', 'asteroid_database_path')
         # JPL:
-        # f_database = os.path.join(path_to_database, 'ELEMENTS.NUMBR')
+        f_database = os.path.join(path_to_database, 'ELEMENTS.NUMBR')
         # MPC:
         # f_database = os.path.join(path_to_database, 'MPCORB.dat')
-        f_database = os.path.join(path_to_database, 'DAILY.DAT')
+        # f_database = os.path.join(path_to_database, 'DAILY.DAT')
 
         try:
             # asteroid = asteroid_data_load(_f_database=f_database, asteroid_name=name)
-            asteroid = asteroid_data_load_3(_f_database=f_database, asteroid_name=name, _provider='mpc')
-            # asteroid = asteroid_data_load_3(_f_database=f_database, asteroid_name=name, _provider='jpl')
+            # asteroid = asteroid_data_load_3(_f_database=f_database, asteroid_name=name, _provider='mpc')
+            asteroid = asteroid_data_load_3(_f_database=f_database, asteroid_name=name, _provider='jpl')
             # asteroid = asteroid_data_load_2(_f_database=f_database, asteroid_name=name, _provider='mpc')
             # print(asteroid)
         except Exception:
