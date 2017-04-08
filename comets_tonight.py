@@ -14,7 +14,7 @@ for the Robo-AO queue
 """
 
 import datetime
-from solarsyslib2 import TargetListComets#, TargetXML
+from solarsyslib2 import TargetListComets, TargetXML
 import pytz
 import os
 import inspect
@@ -73,18 +73,20 @@ if __name__ == '__main__':
                           _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, _date=today)
     # get all bright targets given m_lim and check observability given elv_lim, twilight and fraction
     mask = None
-    tl.target_list(today, mask, _parallel=True, _epoch='J2000', _output_Vmag=True, _night_grid_n=40,
+    tl.target_list(today, mask, _parallel=False, _epoch='J2000', _output_Vmag=True, _night_grid_n=40,
                    _twilight=twilight, _fraction=fraction)
 
-    # ''' make/change XML files '''
-    # path = config.get('Path', 'program_path')
-    # program_number = config.get('Path', 'program_number_comets')
-    # txml = TargetXML(path=path, program_number=program_number,
-    #                  server=config.get('Path', 'queue_server'))
-    # # dump 'em targets!
-    # c = txml.dumpTargets(targets, epoch='J2000')
-    # if c is None:
-    #     print('Successfully updated the target list via the website')
-    #
-    #     # clean up the target list - remove unobserved, which are not suitable anymore:
-    #     txml.clean_target_list()
+    ''' make/change XML files '''
+    path = config.get('Path', 'program_path')
+    program_number = config.get('Path', 'program_number_comets')
+
+    txml = TargetXML(path=path, program_number=program_number,
+                     server=config.get('Path', 'queue_server'))
+    # dump 'em targets!
+    c = txml.dumpTargets(tl.targets, epoch='J2000')
+
+    if c is None:
+        print('Successfully updated the target list via the website')
+
+        # clean up the target list - remove unobserved, which are not suitable anymore:
+        txml.clean_target_list()

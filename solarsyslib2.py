@@ -4,6 +4,7 @@ import os
 import datetime
 import urllib2
 import ConfigParser
+import requests
 import argparse
 import json
 import inspect
@@ -25,6 +26,7 @@ from scipy.ndimage import gaussian_filter
 from astropy.convolution import convolve_fft
 from astropy import wcs
 from astropy.io import fits
+from astropy.coordinates import Angle
 from astropy.time import Time
 from time import time as _time
 import pytz
@@ -2087,7 +2089,10 @@ class TargetListComets(TargetList):
 
         # jpl_eph - path to eph used by pypride
         radec, radec_dot, Vmag = comet.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
-                                                epoch=epoch, output_Vmag=output_Vmag, _cat_eop=self.inp['cat_eop'])
+                                                 epoch=epoch, output_Vmag=output_Vmag, _cat_eop=self.inp['cat_eop'])
+
+        print(target['name'], [Angle(radec[0], unit=u.rad).hms, Angle(radec[1], unit=u.rad).dms],
+              radec_dot, Vmag, Time(_mjd, format='mjd', scale='tdb').utc.datetime)
 
         return radec, radec_dot, Vmag
 
@@ -2610,7 +2615,7 @@ class MinorBody(object):
         self.H = float(H)
         self.G = float(G)
 
-        print(name, e, i, w, Node, GM, t0, a, M0, q, tau, H, G)
+        # print(name, e, i, w, Node, GM, t0, a, M0, q, tau, H, G)
 
     def __str__(self):
         """
@@ -2663,11 +2668,13 @@ class MinorBody(object):
         H = deepcopy(M)
         Q = (H + M) / e
         tmp_H = 1e5
-        tmp_Q = 1e5
+        # tmp_Q = 1e5
         n_iter = 1
 
-        while ((np.abs(H - tmp_H) > 1e-9) and (np.abs(Q - tmp_Q) > 1e-9)) or (n_iter <= max_iter):
-            tmp = deepcopy(H)
+        # while ((np.abs(H - tmp_H) > 1e-9) and (np.abs(Q - tmp_Q) > 1e-9)) or (n_iter <= max_iter):
+        while (np.abs(H - tmp_H) > 1e-9) or (n_iter <= max_iter):
+            tmp_H = deepcopy(H)
+            # tmp_Q = deepcopy(Q)
             H = np.log(np.sqrt(Q**2 + 1) + Q)
             Q = (H + M) / e
             n_iter += 1
@@ -2681,8 +2688,10 @@ class MinorBody(object):
             from Keplerian elements
             t -- epoch in mjd [decimal days]
         """
-        if (0.0 < self.e < 1) and (self.a is not None):
-            ''' elliptical motion: '''
+        # print(self.name, self.e, self.a, self.q, self.tau, self.M0)
+
+        if (0.0 < self.e < 1.0) and (self.a is not None) and (self.M0 is not None):
+            ''' elliptical motion: (asteroids) '''
             # mean motion:
             n = np.sqrt(self.GM / self.a / self.a / self.a) * 86400.0  # [rad/day]
             # mean anomaly at t:
@@ -2697,8 +2706,28 @@ class MinorBody(object):
             cosv = (cosE - self.e) / (1.0 - self.e * cosE)
             r = self.a * (1.0 - self.e ** 2) / (1.0 + self.e * cosv)
             #        r = self.a*(1 - self.e*cosE)
+            p = self.a * (1.0 - self.e ** 2)
 
-        elif (self.e == 1.0) and (self.q is not None):  # to machine precision
+        elif (0.0 < self.e < 1.0) and (self.q is not None) and (self.tau is not None):
+            ''' elliptical motion: (comets) '''
+            a = self.q / (1.0 - self.e)
+            # mean motion:
+            n = np.sqrt(self.GM / a / a / a) * 86400.0  # [rad/day]
+            # mean anomaly at t:
+            M = n * (t - self.tau)
+            #        print(np.fmod(M, 2*np.pi))
+            # solve Kepler equation, get eccentric anomaly:
+            E = self.kepler(self.e, M)
+            cosE = np.cos(E)
+            sinE = np.sin(E)
+            # get true anomaly and distance from focus:
+            sinv = np.sqrt(1.0 - self.e ** 2) * sinE / (1.0 - self.e * cosE)
+            cosv = (cosE - self.e) / (1.0 - self.e * cosE)
+            r = a * (1.0 - self.e ** 2) / (1.0 + self.e * cosv)
+            #        r = self.a*(1 - self.e*cosE)
+            p = a * (1.0 - self.e ** 2)
+
+        elif (self.e == 1.0) and (self.q is not None) and (self.tau is not None):  # to machine precision
             ''' parabolic motion '''
             # mean motion:
             n = np.sqrt(self.GM / (2.0 * self.q))
@@ -2715,7 +2744,7 @@ class MinorBody(object):
             r = p*(1 + cosv)
             # r = p*(1.0 + S**2) / 2
 
-        elif (self.e > 1.0) and (self.q is not None):
+        elif (self.e > 1.0) and (self.q is not None) and (self.tau is not None):
             ''' hyperbolic motion '''
             # real semi axis
             a = self.q / (self.e - 1.0)
@@ -2730,8 +2759,9 @@ class MinorBody(object):
             # get true anomaly and distance from focus:
             sinv = np.sqrt(self.e ** 2 - 1.0) * sinhH / (self.e * coshH - 1.0)
             cosv = (self.e - coshH) / (self.e * coshH - 1.0)
-            r = self.a * (self.e ** 2 - 1.0) / (1.0 + self.e * cosv)
-            # r = self.a*(self.e*coshH - 1.0)
+            r = a * (self.e ** 2 - 1.0) / (1.0 + self.e * cosv)
+            # r = a*(self.e*coshH - 1.0)
+            p = a * (self.e ** 2 - 1.0)
 
         else:
             raise Exception('Bad set of Keplerian elements, cannot proceed: {:s}'.format(self.name))
@@ -2749,7 +2779,6 @@ class MinorBody(object):
         y = r * (cosu * sinNode + sinu * cosNode * cosi)
         z = r * sinu * sini
         # velocity
-        p = self.a * (1.0 - self.e ** 2)
         V_1 = np.sqrt(self.GM / p) * self.e * sinv
         V_2 = np.sqrt(self.GM / p) * (1.0 + self.e * cosv)
         vx = x * V_1 / r + (-sinu * cosNode - cosu * sinNode * cosi) * V_2
@@ -2839,9 +2868,10 @@ class MinorBody(object):
 
         # target state:
         state = self.ecliptic_to_equatorial(self.to_cart(mjd))
+        # print(state)
 
         # station GCRS position/velocity:
-        if station is not None and station.r_GCRS is None:
+        if (station is not None) and (station.r_GCRS is None):
             r2000 = self.PNmatrix(Time(mjd, format='mjd'), station.lon_gcen, station.u, station.v, _cat_eop)
             station.GTRS_to_GCRS(r2000)
 
@@ -2947,13 +2977,466 @@ class MinorBody(object):
 
             AU_DE430 = 1.49597870700000000e+11  # m
 
-            Vmag = self.H - 2.5 * np.log10((1.0 - self.G) * phi1 + self.G * phi2) + \
-                   5.0 * np.log10(EA_norm * SA_norm / AU_DE430 ** 2)
+            if self.tau is None:
+                # asteroid?
+                Vmag = self.H - 2.5 * np.log10((1.0 - self.G) * phi1 + self.G * phi2) + \
+                       5.0 * np.log10(EA_norm * SA_norm / AU_DE430 ** 2)
+            else:
+                # comet? compute total brightness:
+                Vmag = self.H + 5.0 * np.log10(EA_norm / AU_DE430) + 2.5 * self.G * np.log10(SA_norm / AU_DE430)
+
+            ''' Comets:
+            m1 = H + 5 log (delta) + 2.5G log (r)
+            delta: geocentric distance
+            r: heliocentric distance
+            
+             T-mag N-mag =
+               Comet's approximate apparent visual total magnitude ("T-mag") and nuclear
+            magnitude ("N-mag") by following standard IAU definitions:
+                T-mag =  M1 + 5*log10(delta) + k1*log10(r)
+                N-mag =  M2 + 5*log10(delta) + k2*log10(r) + phcof*beta
+               Units: MAGNITUDES
+            '''
 
         # returning SkyCoord is handy, but very expensive
         # return (SkyCoord(ra=ra, dec=dec, unit=(u.rad, u.rad), frame='icrs'),
         #         (ra_dot, dec_dot), Vmag)
         return [ra, dec], [ra_dot, dec_dot], Vmag
+
+
+def getModefromMag(mag):
+    """
+        VICD mode depending on the object magnitude
+    """
+    m = float(mag)
+    if m < 8:
+        mode = '6'
+    elif 8 <= m < 10:
+        mode = '7'
+    elif 10 <= m < 12:
+        mode = '8'
+    elif 12 <= m < 13:
+        mode = '9'
+    elif m >= 13:
+        mode = '10'
+    return mode
+
+
+class TargetXML(object):
+    """
+        Class to handle queue target xml files
+    """
+
+    def __init__(self, path, program_number, server='http://localhost:8081'):
+        self.program_number = int(program_number)
+        self.path = os.path.join(path, 'Program_{:d}'.format(int(program_number)))
+        self.server = server
+        self.Targets = None
+
+    def getAllTargetXML(self):
+        """
+            check if there are target XML files under self.path
+            load them if affirmative
+        """
+        nXML = len([f for f in os.listdir(self.path)
+                    if 'Target_' in f and f[0] != '.'])
+        if nXML == 0:
+            return None
+        else:
+            targets = {}
+            for f in os.listdir(self.path):
+                if 'Target_' in f and f[0] != '.':
+                    tree = ET.parse(os.path.join(self.path, f))
+                    root = tree.getroot()
+
+                    # Ordnung muss sein!
+                    targ = OrderedDict()
+                    for content in root:
+                        if content.tag != 'Object':
+                            targ[content.tag] = content.text
+                        else:
+                            if 'Object' not in targ:
+                                targ['Object'] = []
+                            obj = OrderedDict()
+                            for data_obj in content:
+                                if data_obj.tag != 'Observation':
+                                    obj[data_obj.tag] = data_obj.text
+                                else:
+                                    if 'Observation' not in obj:
+                                        obj['Observation'] = []
+                                    obs = OrderedDict()
+                                    for data_obs in data_obj:
+                                        obs[data_obs.tag] = data_obs.text
+                                    obj['Observation'].append(obs)
+                            targ['Object'].append(obj)
+
+                    targets[f] = targ
+
+        self.Targets = targets
+
+    def getTargetNames(self):
+        """
+            Get target names
+        """
+        if self.Targets is None:
+            return None
+        else:
+            targetNames = {self.Targets[t]['name']: t for t in self.Targets}
+
+        return targetNames
+
+    @staticmethod
+    def dummyXML(program_number=-1, obj='asteroid'):
+        """
+
+        :param program_number:
+        :param obj: 'asteroid' or 'ploon'
+        :return:
+        """
+
+        if obj == 'asteroid':
+            return OrderedDict([('program_number', program_number),
+                                ('number', ''),
+                                ('name', ''),
+                                ('visited_times_for_completion', 3),
+                                # ('seeing_limit', ''),
+                                ('visited_times', 0),
+                                ('done', 0),
+                                ('cadence', 0),
+                                ('comment', 'None'),
+                                ('time_critical_flag', 0),
+                                ('Object',
+                                 [OrderedDict([('number', 1),
+                                               ('RA', ''),
+                                               ('dec', ''),
+                                               ('ra_rate', ''),
+                                               ('dec_rate', ''),
+                                               ('epoch', '2000.0'),
+                                               ('magnitude', ''),
+                                               ('solar_system', 1),
+                                               # ('sun_altitude_limit', ''),
+                                               # ('moon_phase_window', ''),
+                                               # ('airmass_limit', ''),
+                                               # ('sun_distance_limit', ''),
+                                               # ('moon_distance_limit', ''),
+                                               # ('sky_brightness_limit', ''),
+                                               # ('hour_angle_limit', ''),
+                                               ('done', 0),
+                                               ('Observation',
+                                                [OrderedDict([('number', 1),
+                                                              ('exposure_time', 180),
+                                                              ('ao_flag', 1),
+                                                              ('filter_code', 'FILTER_SLOAN_I'),
+                                                              ('camera_mode', ''),
+                                                              ('repeat_times', 1),
+                                                              ('repeated', 0),
+                                                              ('done', 0)])])])])])
+        else:
+            return OrderedDict([('program_number', program_number),
+                                ('number', ''),
+                                ('name', ''),
+                                ('visited_times_for_completion', 300),
+                                # ('seeing_limit', ''),
+                                ('visited_times', 0),
+                                ('done', 0),
+                                ('cadence', 0),
+                                ('comment', 'None'),
+                                ('time_critical_flag', 0),
+                                ('Object',
+                                 [OrderedDict([('number', 1),
+                                               ('RA', ''),
+                                               ('dec', ''),
+                                               ('ra_rate', ''),
+                                               ('dec_rate', ''),
+                                               ('epoch', '2000.0'),
+                                               ('magnitude', ''),
+                                               ('solar_system', 1),
+                                               # ('sun_altitude_limit', ''),
+                                               # ('moon_phase_window', ''),
+                                               # ('airmass_limit', ''),
+                                               # ('sun_distance_limit', ''),
+                                               # ('moon_distance_limit', ''),
+                                               # ('sky_brightness_limit', ''),
+                                               # ('hour_angle_limit', ''),
+                                               ('done', 0),
+                                               ('Observation',
+                                                [OrderedDict([('number', 1),
+                                                              ('exposure_time', 30),
+                                                              ('ao_flag', 1),
+                                                              ('filter_code', 'FILTER_SLOAN_I'),
+                                                              ('camera_mode', ''),
+                                                              ('repeat_times', 1),
+                                                              ('repeated', 0),
+                                                              ('done', 0)]),
+                                                 OrderedDict([('number', 2),
+                                                              ('exposure_time', 30),
+                                                              ('ao_flag', 1),
+                                                              ('filter_code', 'FILTER_SLOAN_Z'),
+                                                              ('camera_mode', ''),
+                                                              ('repeat_times', 1),
+                                                              ('repeated', 0),
+                                                              ('done', 0)]),
+                                                 OrderedDict([('number', 3),
+                                                              ('exposure_time', 30),
+                                                              ('ao_flag', 1),
+                                                              ('filter_code', 'FILTER_SLOAN_R'),
+                                                              ('camera_mode', ''),
+                                                              ('repeat_times', 1),
+                                                              ('repeated', 0),
+                                                              ('done', 0)]),
+                                                 OrderedDict([('number', 4),
+                                                              ('exposure_time', 30),
+                                                              ('ao_flag', 1),
+                                                              ('filter_code', 'FILTER_SLOAN_G'),
+                                                              ('camera_mode', ''),
+                                                              ('repeat_times', 1),
+                                                              ('repeated', 0),
+                                                              ('done', 0)])
+                                                 ])])])])
+
+    def dumpTargets(self, targets, epoch='J2000'):
+        """ Dump target list
+
+        :param targets:
+        :param epoch:
+        :param _server:
+        :return:
+        """
+        # load existing target xml data:
+        self.getAllTargetXML()
+        # get their names:
+        targetNames = self.getTargetNames()
+        max_xml_num = max([int(l[l.index('_') + 1:l.index('.xml')])
+                           for l in targetNames.values()]) \
+            if targetNames is not None else 0
+        target_max_num = max([int(self.Targets[t]['number'])
+                              for t in self.Targets]) \
+            if self.Targets is not None else 0
+
+        # iterate over targets
+        added_target_xml_files = 0
+        for target in targets:
+            # if not is_planet_or_moon(target[0]['name']):
+            # asteroid or planet?
+            if not isinstance(target[0], dict) and 'num' in target[0].dtype.names:
+                name = '{:d} {:s}'.format(target[0]['num'], target[0]['name'])
+            else:
+                name = '{:s}'.format(target[0]['name'])
+
+            # no spaces, please :(
+            name = name.replace(' ', '_')
+            # no primes too, please :(
+            name = name.replace('\'', '_')
+
+            # update existing xml file
+            if targetNames is not None and name in targetNames:
+                # print(name)
+                xml = self.Targets[targetNames[name]]
+
+                if is_planet_or_moon(name) or not is_multiple_asteroid(name):
+                    xml['comment'] = 'modified_{:s}'.format('_'.join(str(datetime.datetime.now()).split()))
+                elif is_multiple_asteroid(name):
+                    xml['comment'] = \
+                        'known_multiple;_modified_{:s}'.format('_'.join(str(datetime.datetime.now()).split()))
+                xml['Object'][0]['RA'] = \
+                    '{:02.0f}:{:02.0f}:{:02.3f}'.format(*hms(target[2][0]))
+                dec = dms(target[2][1])
+                xml['Object'][0]['dec'] = \
+                    '{:02.0f}:{:02.0f}:{:02.3f}'.format(dec[0], abs(dec[1]), abs(dec[2]))
+                ''' !!! NOTE: ra rate must be with a minus sign !!! '''
+                xml['Object'][0]['ra_rate'] = '{:.5f}'.format(-target[3][0])
+                ''' NOTE 2017/03/15: not sure about the new TCS! will try as is '''
+                xml['Object'][0]['ra_rate'] = '{:.5f}'.format(target[3][0])
+                xml['Object'][0]['dec_rate'] = '{:.5f}'.format(target[3][1])
+                #                print target[1].decimalyear, target[1].jyear,
+                #                        2000.0 + (target[1].jd-2451544.5)/365.25
+                if epoch == 'J2000':
+                    xml['Object'][0]['epoch'] = '{:.1f}'.format(2000.0)
+                else:
+                    xml['Object'][0]['epoch'] = '{:.9f}'.format(target[1].jyear)
+                xml['Object'][0]['magnitude'] = '{:.3f}'.format(target[4])
+                # set hour angle limit if target crosses meridian during the night:
+                if target[-1]:
+                    xml['Object'][0]['hour_angle_limit'] = '0.5'
+                else:
+                    xml['Object'][0]['hour_angle_limit'] = ''
+                # planet or moon?
+                if is_planet_or_moon(name):
+                    # set up correct filters:
+                    # xml['Object'][0]['Observation'][0]['filter_code'] = 'FILTER_SLOAN_I'
+                    # since we want to observe them every night,
+                    # we need to force the queue to do so
+                    xml['done'] = 0
+                    xml['Object'][0]['done'] = 0
+                    for ii, _ in enumerate(xml['Object'][0]['Observation']):
+                        xml['Object'][0]['Observation'][ii]['done'] = 0
+                for ii, _ in enumerate(xml['Object'][0]['Observation']):
+                    xml['Object'][0]['Observation'][ii]['camera_mode'] = \
+                        '{:s}'.format(getModefromMag(target[4]))
+
+                target_xml_path = os.path.join(self.path, targetNames[name])
+            #                print target_xml_path
+
+            # create a new xml file
+            else:
+                if is_planet_or_moon(name):
+                    obj = 'ploon'
+                else:
+                    obj = 'asteroid'
+                xml = self.dummyXML(self.program_number, obj=obj)
+                added_target_xml_files += 1
+
+                xml['number'] = target_max_num + added_target_xml_files
+                xml['name'] = name
+                if is_planet_or_moon(name) or not is_multiple_asteroid(name):
+                    xml['comment'] = 'modified_{:s}'.format('_'.join(str(datetime.datetime.now()).split()))
+                elif is_multiple_asteroid(name):
+                    xml['comment'] = \
+                        'known_multiple;_modified_{:s}'.format('_'.join(str(datetime.datetime.now()).split()))
+                xml['Object'][0]['RA'] = \
+                    '{:02.0f}:{:02.0f}:{:02.3f}'.format(*hms(target[2][0]))
+                dec = dms(target[2][1])
+                xml['Object'][0]['dec'] = \
+                    '{:02.0f}:{:02.0f}:{:02.3f}'.format(dec[0], abs(dec[1]), abs(dec[2]))
+                ''' !!! NOTE: ra rate must be with a minus sign !!! '''
+                xml['Object'][0]['ra_rate'] = '{:.5f}'.format(-target[3][0])
+                xml['Object'][0]['dec_rate'] = '{:.5f}'.format(target[3][1])
+                if epoch == 'J2000':
+                    xml['Object'][0]['epoch'] = '{:.1f}'.format(2000.0)
+                else:
+                    xml['Object'][0]['epoch'] = '{:.9f}'.format(target[1].jyear)
+                xml['Object'][0]['magnitude'] = '{:.3f}'.format(target[4])
+                # set hour angle limit if target crosses meridian during the night:
+                if target[-1]:
+                    xml['Object'][0]['hour_angle_limit'] = '0.5'
+                else:
+                    xml['Object'][0]['hour_angle_limit'] = ''
+                # planet or moon?
+                if is_planet_or_moon(name):
+                    # set up correct filters:
+                    # xml['Object'][0]['Observation'][0]['filter_code'] = 'FILTER_SLOAN_I'
+                    # since we want to observe them every night,
+                    # we need to force the queue to do so
+                    xml['done'] = 0
+                    xml['Object'][0]['done'] = 0
+                    for ii, _ in enumerate(xml['Object'][0]['Observation']):
+                        xml['Object'][0]['Observation'][ii]['done'] = 0
+                for ii, _ in enumerate(xml['Object'][0]['Observation']):
+                    xml['Object'][0]['Observation'][ii]['camera_mode'] = \
+                        '{:s}'.format(getModefromMag(target[4]))
+
+                target_xml_path = os.path.join(self.path,
+                                               'Target_{:d}.xml'.format(max_xml_num +
+                                                                        added_target_xml_files))
+            # print target_xml_path
+
+            # build an xml-file:
+            target_xml = dicttoxml(xml, custom_root='Target', attr_type=False)
+            # this is good enough, but adds unnecessary <item> tags. remove em:
+            dom = minidom.parseString(target_xml)
+            target_xml = dom.toprettyxml()
+            # <item>'s left extra \t's after them - remove them:
+            target_xml = target_xml.replace('\t\t\t', '\t\t')
+            target_xml = target_xml.replace('\t\t\t\t', '\t\t\t')
+            target_xml = target_xml.replace('<?xml version="1.0" ?>', '')
+            target_xml = target_xml.split('\n')
+            # remove empty tags
+            target_xml = [t for t in target_xml if 'item>' not in t \
+                          and '/>' not in t]
+
+            ind_obs_start = [i for i, v in enumerate(target_xml) if '<Observation>' in v]
+            ind_obs_stop = [i for i, v in enumerate(target_xml) if '</Observation>' in v]
+            for (start, stop) in zip(ind_obs_start, ind_obs_stop):
+                ind_num_obs = [i+start for i, v in enumerate(target_xml[start:stop])
+                                    if '<number>' in v]
+                if len(ind_num_obs) > 1:
+                    for ind in ind_num_obs[:0:-1]:
+                        target_xml.insert(ind, '\t\t</Observation>\n\t\t<Observation>')
+
+            # print target_xml
+
+            with open(target_xml_path, 'w') as f:
+                for line in target_xml[1:-1]:
+                    f.write('{:s}\n'.format(line))
+                f.write('{:s}'.format(target_xml[-1]))
+
+        # update Programs.xml if necessary
+        try:
+            r = requests.get(self.server, auth=('admin', 'robo@0'))
+            if int(r.status_code) != 200:
+                    print('server error')
+        except Exception:
+            print('failed to connect to the website.')
+            return 1
+
+    def clean_target_list(self):
+        """
+            Remove targets from the queue if it doesn't satisfy
+            observability criteria any more (and thus was not just updated)
+        """
+        pnot = len([_f for _f in os.listdir(self.path)
+                    if 'Target_' in _f and _f[0] != '.'])
+        # iterate over target xml files
+        target_nums_to_remove = []
+
+        target_list_xml = ['Target_{:d}.xml'.format(i+1) for i in range(int(pnot))]
+
+        for targ_num, target_xml in enumerate(target_list_xml):
+            tree = ET.parse(os.path.join(self.path, target_xml))
+            root = tree.getroot()
+
+            targ = dict()
+            targ['Object'] = []
+            for content in root:
+                if content.tag != 'Object':
+                    targ[content.tag] = content.text
+                else:
+                    obj = dict()
+                    obj['Observation'] = []
+                    for data_obj in content:
+                        if data_obj.tag != 'Observation':
+                            obj[data_obj.tag] = data_obj.text
+                        else:
+                            obs = dict()
+                            for data_obs in data_obj:
+                                obs[data_obs.tag] = data_obs.text
+                            obj['Observation'].append(obs)
+                    targ['Object'].append(obj)
+
+            try:
+                # TODO: the queue software does not like spaces even in comments
+                t_xml = datetime.datetime.strptime(' '.join(targ['comment'].split('_')[-2:]),
+                                                   '%Y-%m-%d %H:%M:%S.%f')
+            except ValueError:
+                # why not?
+                t_xml = datetime.datetime.now() - datetime.timedelta(days=10)
+            # updated > 2 days ago?
+            if (datetime.datetime.now() - t_xml).total_seconds() > 86400 * 2:
+            # if (datetime.datetime.now() - t_xml).total_seconds() > 86400*2 \
+            #         and targ['done'] == '0' \
+            #         and targ['Object'][0]['Observation'][0]['repeated'] == '0':
+                # print(targ['comment'], targ['done'])
+                target_nums_to_remove.append(targ_num+1)
+
+        # now remove the xml files. start from end not to scoop numbering
+        if len(target_nums_to_remove) > 0:
+            try:
+                for _targ_num in target_nums_to_remove[::-1]:
+                    r = requests.get(os.path.join(self.server, 'removeTarget'),
+                                     auth=('admin', 'robo@0'),
+                                     params={'program_number': int(self.program_number),
+                                             'target_number': int(_targ_num)})
+                    # print(_targ_num, r.status_code)
+                    if int(r.status_code) != 200:
+                        print('server error')
+                print('removed {:d} targets that are no longer suitable for observations.'
+                      .format(len(target_nums_to_remove)))
+                # call main page to modify/fix Programs.xml
+                r = requests.get(self.server, auth=('admin', 'robo@0'))
+                if int(r.status_code) != 200:
+                        print('server error')
+            except Exception:
+                print('failed to remove targets via the website.')
 
 
 if __name__ == '__main__':

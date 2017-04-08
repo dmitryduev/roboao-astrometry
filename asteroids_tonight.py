@@ -5,7 +5,7 @@ import ConfigParser
 import inspect
 import datetime
 import pytz
-from solarsyslib2 import TargetListAsteroids
+from solarsyslib2 import TargetListAsteroids, TargetXML
 
 if __name__ == '__main__':
     ''' Create command line argument parser '''
@@ -95,5 +95,20 @@ if __name__ == '__main__':
     tl.target_list(date, mask, _parallel=True, _epoch='J2000', _output_Vmag=True, _night_grid_n=40,
                    _twilight=twilight, _fraction=fraction)
 
-    for a in tl.targets:
-        print(a)
+    # for a in tl.targets:
+    #     print(a)
+
+    ''' make/change XML files '''
+    path = config.get('Path', 'program_path')
+    program_number = config.get('Path', 'program_number_asteroids')
+
+    txml = TargetXML(path=path, program_number=program_number,
+                     server=config.get('Path', 'queue_server'))
+    # dump 'em targets!
+    c = txml.dumpTargets(tl.targets, epoch='J2000')
+
+    if c is None:
+        print('Successfully updated the target list via the website')
+
+        # clean up the target list - remove unobserved, which are not suitable anymore:
+        txml.clean_target_list()
