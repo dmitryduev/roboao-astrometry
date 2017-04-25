@@ -867,8 +867,8 @@ if __name__ == '__main__':
     print('M^-1:', M_m1)
 
     Q, R = np.linalg.qr(M)
-    # print(Q)
-    # print(R)
+    # print('Q:', Q)
+    # print('R:', R)
 
     Y_C = compute_detector_position(plsq[0], X).T + preview_img.shape[0]/2
     Y_tan = compute_detector_position(plsq[0], np.array([list(plsq[0][0:2])])).T + preview_img.shape[0]/2
@@ -1101,7 +1101,8 @@ if __name__ == '__main__':
     # interpolate into regular grid:
     from scipy.interpolate import griddata
 
-    xx, yy = np.mgrid[-nx // 2 + 1: nx // 2: 1, -nx // 2 + 1: nx // 2: 1]
+    # xx, yy = np.mgrid[-nx // 2 + 1: nx // 2: 1, -nx // 2 + 1: nx // 2: 1]
+    xx, yy = np.mgrid[0:nx:1, 0:nx:1] - nx // 2
 
     preview_img_no_distortion = griddata((np.ravel(vu), np.ravel(vv)), np.ravel(preview_img),
                                          (xx, yy), method='cubic', fill_value=0)
