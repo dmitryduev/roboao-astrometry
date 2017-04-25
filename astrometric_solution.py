@@ -4,6 +4,7 @@ import numpy as np
 import os
 from skimage import exposure, img_as_float
 from copy import deepcopy
+from scipy.optimize import leastsq
 from astropy.io import fits
 from astropy import wcs
 import astropy.units as u
@@ -14,6 +15,7 @@ from collections import OrderedDict
 from astroquery.query import suspend_cache
 from astroquery.vizier import Vizier
 from itertools import combinations
+from numba import jit
 from time import time as _time
 import matplotlib
 matplotlib.use('Qt5Agg')
@@ -24,6 +26,7 @@ import matplotlib.pyplot as plt
 # plt.close('all')
 # sns.set_context('talk')
 import aplpy
+import image_registration
 np.set_printoptions(16)
 
 
@@ -147,7 +150,7 @@ def generate_image(xy, mag, xy_ast=None, mag_ast=None, exp=None, nx=2048, ny=204
 
     if psf is None:
         # Convolve with a gaussian
-        image = gaussian_filter(image, 7)
+        image = gaussian_filter(image, 7 * nx/2e3)
     else:
         # convolve with a (model) psf
         # fftn, ifftn = image_registration.fft_tools.fast_ffts.get_ffts(nthreads=4, use_numpy_fft=False)
@@ -157,7 +160,7 @@ def generate_image(xy, mag, xy_ast=None, mag_ast=None, exp=None, nx=2048, ny=204
     return image
 
 
-def make_image(target, window_size, _model_psf, pix_stars, mag_stars):
+def make_image(target, window_size, _model_psf, pix_stars, mag_stars, num_pix=1024):
     """
 
     :return:
@@ -166,8 +169,8 @@ def make_image(target, window_size, _model_psf, pix_stars, mag_stars):
     # Create a new WCS object.  The number of axes must be set
     # from the start
     w = wcs.WCS(naxis=2)
-    w._naxis1 = int(1024 * (window_size[0] * 180.0 / np.pi * 3600) / 36)
-    w._naxis2 = int(1024 * (window_size[1] * 180.0 / np.pi * 3600) / 36)
+    w._naxis1 = int(num_pix * (window_size[0] * 180.0 / np.pi * 3600) / 36)
+    w._naxis2 = int(num_pix * (window_size[1] * 180.0 / np.pi * 3600) / 36)
     w.naxis1 = w._naxis1
     w.naxis2 = w._naxis2
 
@@ -191,8 +194,16 @@ def make_image(target, window_size, _model_psf, pix_stars, mag_stars):
     # w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
     # [8.9799574245829621e-09, 4.8009647689165968e-06]])
     # 1024x1024
-    w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
-                         [8.9799574245829621e-09, 4.8009647689165968e-06]]) * 2
+    # w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
+    #                      [8.9799574245829621e-09, 4.8009647689165968e-06]]) * 2
+    # if num_pix == 2048:
+    #     # for upsampled 2048x2048
+    #     w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
+    #                          [8.9799574245829621e-09, 4.8009647689165968e-06]])
+    # else:
+    #     # 1024x1024
+    #     w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
+    #                          [8.9799574245829621e-09, 4.8009647689165968e-06]]) * 2
 
     ''' create a [fake] simulated image '''
     # tic = _time()
@@ -201,8 +212,9 @@ def make_image(target, window_size, _model_psf, pix_stars, mag_stars):
     return sim_image
 
 
-def plot_field(target, window_size, _model_psf, grid_stars, _highlight_brighter_than_mag=16.0,
-               scale_bar=False, scale_bar_size=20, _display_plot=False, _save_plot=False, path='./', name='field'):
+def plot_field(target, window_size, _model_psf, grid_stars, num_pix=1024, _highlight_brighter_than_mag=None,
+               _display_magnitude_labels=False, scale_bar=False, scale_bar_size=20,
+               _display_plot=False, _save_plot=False, path='./', name='field'):
     """
 
     :return:
@@ -211,10 +223,12 @@ def plot_field(target, window_size, _model_psf, grid_stars, _highlight_brighter_
     # Create a new WCS object.  The number of axes must be set
     # from the start
     w = wcs.WCS(naxis=2)
+    w._naxis1 = int(num_pix * (window_size[0] * 180.0 / np.pi * 3600) / 36)
+    w._naxis2 = int(num_pix * (window_size[1] * 180.0 / np.pi * 3600) / 36)
+    # w._naxis1 = int(1024 * (window_size[0] * 180.0 / np.pi * 3600) / 36)
+    # w._naxis2 = int(1024 * (window_size[1] * 180.0 / np.pi * 3600) / 36)
     # w._naxis1 = int(2048 * (window_size[0] * 180.0 / np.pi * 3600) / 36)
     # w._naxis2 = int(2048 * (window_size[1] * 180.0 / np.pi * 3600) / 36)
-    w._naxis1 = int(1024 * (window_size[0] * 180.0 / np.pi * 3600) / 36)
-    w._naxis2 = int(1024 * (window_size[1] * 180.0 / np.pi * 3600) / 36)
     w.naxis1 = w._naxis1
     w.naxis2 = w._naxis2
 
@@ -234,14 +248,27 @@ def plot_field(target, window_size, _model_psf, grid_stars, _highlight_brighter_
     # w.wcs.cd = np.array([[-4.9653758578816782e-06, 7.8012027500556068e-08],
     #                      [8.9799574245829621e-09, 4.8009647689165968e-06]])
     # with RA inverted to correspond to previews
-    # for upsampled 2048x2048
+    if num_pix == 2048:
+        # for upsampled 2048x2048
+        # w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
+        #                      [8.9799574245829621e-09, 4.8009647689165968e-06]])
+        # new:
+        w.wcs.cd = np.array([[4.9938707892035111e-06,   2.7601870670659687e-08],
+                             [7.7159226739276786e-09,   4.8389368351465302e-06]])
+    else:
+        # 1024x1024
+        # w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
+        #                      [8.9799574245829621e-09, 4.8009647689165968e-06]]) * 2
+        # new:
+        w.wcs.cd = np.array([[4.9938707892035111e-06, 2.7601870670659687e-08],
+                             [7.7159226739276786e-09, 4.8389368351465302e-06]]) * 2
     # w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
-    # [8.9799574245829621e-09, 4.8009647689165968e-06]])
-    # 1024x1024
-    w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
-                         [8.9799574245829621e-09, 4.8009647689165968e-06]]) * 2
-    # w.wcs.cd = np.array([[5e-06, 0],
-    #                      [0, 5e-06]]) * 2
+    #                      [8.9799574245829621e-09, 4.8009647689165968e-06]]) * 2
+    # w.wcs.cd = np.array([[5e-06, 1e-8],
+    #                      [1e-8, 5e-06]]) * 2
+    # print(w.wcs.cd)
+    # [[-9.9628143319575235e-06,   6.0168523927372889e-08]
+    #  [-1.1665005567301751e-07,   9.5769294337527134e-06]]
 
     # set up quadratic distortions [xy->uv and uv->xy]
     # w.sip = wcs.Sip(a=np.array([-1.7628536101583434e-06, 5.2721963537675933e-08, -1.2395119995283236e-06]),
@@ -297,11 +324,18 @@ def plot_field(target, window_size, _model_psf, grid_stars, _highlight_brighter_
     #                  facecolor='white', marker='o', s=30, alpha=0.7)
 
     # highlight stars bright enough to serve as tip-tilt guide stars:
-    # mask_bright = mag_stars <= _highlight_brighter_than_mag
-    # if np.max(mask_bright) == 1:
-    #     fig.show_markers(grid_stars[mask_bright]['RA_ICRS'], grid_stars[mask_bright]['DE_ICRS'],
-    #                      layer='marker_set_2', edgecolor=plt.cm.Oranges(0.9),
-    #                      facecolor=plt.cm.Oranges(0.8), marker='+', s=50, alpha=0.9, linewidths=1)
+    if _highlight_brighter_than_mag is not None:
+        mask_bright = mag_stars <= float(_highlight_brighter_than_mag)
+        if np.max(mask_bright) == 1:
+            fig.show_markers(grid_stars[mask_bright]['RA_ICRS'], grid_stars[mask_bright]['DE_ICRS'],
+                             layer='marker_set_2', edgecolor=plt.cm.Oranges(0.9),
+                             facecolor=plt.cm.Oranges(0.8), marker='+', s=50, alpha=0.9, linewidths=1)
+
+    # show labels with magnitudes
+    if _display_magnitude_labels:
+        for star in grid_stars:
+            fig.add_label(star['RA_ICRS'], star['DE_ICRS'], '{:.1f}'.format(star['__Gmag_']),
+                          color=plt.cm.Oranges(0.4), horizontalalignment='right')
 
     # add scale bar
     if scale_bar:
@@ -348,6 +382,22 @@ def load_fits(fin, return_header=False):
     _header = get_fits_header(fin) if return_header else None
 
     return _scidata, _header
+
+
+def export_fits(path, _data, _header=None):
+    """
+        Save fits file overwriting if exists
+    :param path:
+    :param _data:
+    :param _header:
+    :return:
+    """
+    if _header is not None:
+        hdu = fits.PrimaryHDU(_data, header=_header)
+    else:
+        hdu = fits.PrimaryHDU(_data)
+    hdulist = fits.HDUList([hdu])
+    hdulist.writeto(path, overwrite=True)
 
 
 def scale_image(image, correction='local'):
@@ -413,6 +463,119 @@ def triangulate(xy, cut=None, max_pix=None):
     return quads
 
 
+def residual(p, y, x):
+    """
+        Simultaneously solve for RA_tan, DEC_tan, M, and 2nd-order distortion params
+    :param p:
+    :param y:
+    :param x:
+    :return:
+    """
+    # convert (ra, dec)s to 3d
+    r = np.vstack((np.cos(x[:, 0]*np.pi/180.0)*np.cos(x[:, 1]*np.pi/180.0),
+                   np.sin(x[:, 0]*np.pi/180.0)*np.cos(x[:, 1]*np.pi/180.0),
+                   np.sin(x[:, 1]*np.pi/180.0))).T
+    # print(r.shape)
+    # print(r)
+
+    # the same for the tangent point
+    t = np.array((np.cos(p[0]*np.pi/180.0)*np.cos(p[1]*np.pi/180.0),
+                  np.sin(p[0]*np.pi/180.0)*np.cos(p[1]*np.pi/180.0),
+                  np.sin(p[1]*np.pi/180.0)))
+    # print(t)
+
+    k = np.array([0, 0, 1])
+
+    # u,v projections
+    u = np.cross(t, k) / np.linalg.norm(np.cross(t, k))
+    v = np.cross(u, t)
+    # print(u, v)
+
+    R = r / (np.dot(r, t)[:, None])
+
+    # print(R)
+
+    # native tangent-plane coordinates:
+    UV = 180.0/np.pi * np.vstack((np.dot(R, u), np.dot(R, v))).T
+
+    # print(UV)
+
+    M_m1 = np.matrix([[p[2], p[3]], [p[4], p[5]]])
+    # M = np.linalg.pinv(M_m1)
+    # print(M)
+
+    # x_tan = M * np.array([[p[0]], [p[1]]])
+    x_tan = np.array([[0], [0]])
+    # print(x_tan)
+
+    ksieta = (M_m1 * UV.T).T
+    y_C = []
+    A_02, A_11, A_20, B_02, B_11, B_20 = p[6:]
+
+    for i in range(ksieta.shape[0]):
+        ksi_i = ksieta[i, 0]
+        eta_i = ksieta[i, 1]
+        x_i = ksi_i + x_tan[0] + A_02 * eta_i ** 2 + A_11 * ksi_i * eta_i + A_20 * ksi_i ** 2
+        y_i = eta_i + x_tan[1] + B_02 * eta_i ** 2 + B_11 * ksi_i * eta_i + B_20 * ksi_i ** 2
+        y_C.append([x_i, y_i])
+    y_C = np.squeeze(np.array(y_C))
+
+    # return np.linalg.norm(y.T - (M_m1 * UV.T + x_tan), axis=0)
+    return np.linalg.norm(y.T - y_C.T, axis=0)
+
+
+def compute_detector_position(p, x):
+    # convert (ra, dec)s to 3d
+    r = np.vstack((np.cos(x[:, 0] * np.pi / 180.0) * np.cos(x[:, 1] * np.pi / 180.0),
+                   np.sin(x[:, 0] * np.pi / 180.0) * np.cos(x[:, 1] * np.pi / 180.0),
+                   np.sin(x[:, 1] * np.pi / 180.0))).T
+    # print(r.shape)
+    # print(r)
+
+    # the same for the tangent point
+    t = np.array((np.cos(p[0] * np.pi / 180.0) * np.cos(p[1] * np.pi / 180.0),
+                  np.sin(p[0] * np.pi / 180.0) * np.cos(p[1] * np.pi / 180.0),
+                  np.sin(p[1] * np.pi / 180.0)))
+    # print(t)
+
+    k = np.array([0, 0, 1])
+
+    # u,v projections
+    u = np.cross(t, k) / np.linalg.norm(np.cross(t, k))
+    v = np.cross(u, t)
+    # print(u, v)
+
+    R = r / (np.dot(r, t)[:, None])
+
+    # print(R)
+
+    # native tangent-plane coordinates:
+    UV = 180.0 / np.pi * np.vstack((np.dot(R, u), np.dot(R, v))).T
+
+    # print('UV: ', UV)
+
+    M_m1 = np.matrix([[p[2], p[3]], [p[4], p[5]]])
+    # M = np.linalg.pinv(M_m1)
+    # print(M)
+
+    # x_tan = M * np.array([[p[0]], [p[1]]])
+    x_tan = np.array([[0], [0]])
+
+    ksieta = (M_m1 * UV.T).T
+    y_C = []
+    A_02, A_11, A_20, B_02, B_11, B_20 = p[6:]
+
+    for i in range(ksieta.shape[0]):
+        ksi_i = ksieta[i, 0]
+        eta_i = ksieta[i, 1]
+        x_i = ksi_i + x_tan[0] + A_02 * eta_i ** 2 + A_11 * ksi_i * eta_i + A_20 * ksi_i ** 2
+        y_i = eta_i + x_tan[1] + B_02 * eta_i ** 2 + B_11 * ksi_i * eta_i + B_20 * ksi_i ** 2
+        y_C.append([x_i, y_i])
+    y_C = np.squeeze(np.array(y_C))
+
+    return y_C.T
+
+
 if __name__ == '__main__':
     path_in = '/Users/dmitryduev/_caltech/roboao/_faint_reductions/20170211/0_M13_VIC_Si_o_20170211_122715.043747/'
     # fits_in = '100p.fits'
@@ -420,13 +583,15 @@ if __name__ == '__main__':
 
     # see /usr/local/Cellar/sextractor/2.19.5/share/sextractor/default.sex
 
-    # sew = sewpy.SEW(params=["X_IMAGE", "Y_IMAGE", "XWIN_IMAGE", "YWIN_IMAGE",
-    #                         "ERRAWIN_IMAGE", "ERRBWIN_IMAGE", "ERRTHETAWIN_IMAGE",
+    # for drizzled:
+    # sew = sewpy.SEW(params=["X_IMAGE", "Y_IMAGE", "X2_IMAGE", "Y2_IMAGE", "XY_IMAGE",
+    #                         "XWIN_IMAGE", "YWIN_IMAGE",
     #                         "FLUX_AUTO", "FLUXERR_AUTO",
     #                         "A_IMAGE", "B_IMAGE", "FWHM_IMAGE",
     #                         "FLAGS", "FLAGS_WEIGHT", "FLUX_RADIUS"],
     #                 config={"DETECT_MINAREA": 10, "PHOT_APERTURES": "10", 'DETECT_THRESH': '4.0'},
     #                 sexpath="sex")
+    # for deconvolved:
     sew = sewpy.SEW(params=["X_IMAGE", "Y_IMAGE", "X2_IMAGE", "Y2_IMAGE", "XY_IMAGE",
                             "XWIN_IMAGE", "YWIN_IMAGE",
                             "FLUX_AUTO", "FLUXERR_AUTO",
@@ -465,6 +630,7 @@ if __name__ == '__main__':
 
     # load first image frame from the fits file
     preview_img, header = load_fits(os.path.join(path_in, fits_in), return_header=True)
+    # print(preview_img.shape)
     # scale with local contrast optimization for preview:
     # preview_img = scale_image(preview_img, correction='local')
     # preview_img = scale_image(preview_img, correction='log')
@@ -499,10 +665,17 @@ if __name__ == '__main__':
 
     # plt.show()
 
-    ''' get stats from catalogue, create fake images, then cross correlate them '''
+    ''' get stars from catalogue, create fake images, then cross correlate them '''
     # stars in the field (without mag cut-off):
     # print(header['OBJRA'][0], header['OBJDEC'][0])
-    star_sc = SkyCoord(ra=header['OBJRA'][0], dec=header['OBJDEC'][0], frame='icrs')
+    # star_sc = SkyCoord(ra=header['OBJRA'][0], dec=header['OBJDEC'][0], frame='icrs')
+    # print(star_sc)
+    star_sc = SkyCoord(ra=header['TELRA'][0], dec=header['TELDEC'][0],
+                       unit=(u.hourangle, u.deg), frame='icrs')
+    print('nominal FoV center', star_sc)
+
+    # solved for:
+    star_sc = SkyCoord(ra=2.5042127035557536e+02, dec=3.6454708339784595e+01, unit=(u.deg, u.deg), frame='icrs')
 
     # search radius: " -> rad
     fov_size_ref = 100 * np.pi / 180.0 / 3600
@@ -512,10 +685,13 @@ if __name__ == '__main__':
                                    height=fov_size_ref * u.rad,
                                    catalog=catalog, cache=False)
     fov_stars = stars_table[catalog]
+    print(fov_stars)
 
     pix_ref, mag_ref = plot_field(target=star_sc, window_size=[fov_size_ref, fov_size_ref], _model_psf=None,
-                                  grid_stars=fov_stars, _highlight_brighter_than_mag=16.0, scale_bar=False,
-                                  scale_bar_size=20, _display_plot=False, _save_plot=False, path='./', name='field')
+                                  grid_stars=fov_stars, num_pix=preview_img.shape[0], _highlight_brighter_than_mag=None,
+                                  scale_bar=False, scale_bar_size=20, _display_plot=False, _save_plot=False,
+                                  path='./', name='field')
+    print(pix_ref)
 
     # brightest 20:
     # tic = _time()
@@ -534,19 +710,22 @@ if __name__ == '__main__':
 
     # detected = make_image(target=star_sc, window_size=[fov_size_det, fov_size_det], _model_psf=None,
     #                       pix_stars=pix_det, mag_stars=mag_det)
-    naxis_det = int(1024 * (fov_size_det * 180.0 / np.pi * 3600) / 36)
-    naxis_ref = int(1024 * (fov_size_ref * 180.0 / np.pi * 3600) / 36)
+    naxis_det = int(preview_img.shape[0] * (fov_size_det * 180.0 / np.pi * 3600) / 36)
+    naxis_ref = int(preview_img.shape[0] * (fov_size_ref * 180.0 / np.pi * 3600) / 36)
+    print(naxis_det, naxis_ref)
     # effectively shift detected positions to center of ref frame to reduce distortion effect
     pix_det_ref = pix_det + np.array([naxis_ref//2, naxis_ref//2]) - np.array([naxis_det//2, naxis_det//2])
     detected = make_image(target=star_sc, window_size=[fov_size_ref, fov_size_ref], _model_psf=None,
-                          pix_stars=pix_det_ref, mag_stars=mag_det)
+                          pix_stars=pix_det_ref, mag_stars=mag_det, num_pix=preview_img.shape[0])
     reference = make_image(target=star_sc, window_size=[fov_size_ref, fov_size_ref], _model_psf=None,
-                           pix_stars=pix_ref, mag_stars=mag_ref)
+                           pix_stars=pix_ref, mag_stars=mag_ref, num_pix=preview_img.shape[0])
 
     # register shift: pixel precision first
     from skimage.feature import register_translation
-    shift, error, diffphase = register_translation(reference, detected)
-    print(shift, error)
+    shift, error, diffphase = register_translation(reference, detected, upsample_factor=1)
+    print('pixel precision offset:', shift, error)
+    # shift, error, diffphase = register_translation(reference, detected, upsample_factor=2)
+    # print('subpixel precision offset:', shift, error)
 
     # associate!
     matched = []
@@ -557,20 +736,57 @@ if __name__ == '__main__':
         pix_distance = np.min(np.linalg.norm(pix_ref - s_shifted, axis=1))
         print(pix_distance)
 
-        if pix_distance < 10:
+        # note: because of larger distortion in the y-direction, pix diff there is larger than in x
+        # if pix_distance < 25 * preview_img.shape[0] / 1024:  # 25:
+        if pix_distance < 20:
             min_ind = np.argmin(np.linalg.norm(pix_ref - s_shifted, axis=1))
 
+            # note: errors in Gaia position are given in mas, so convert to deg by  / 1e3 / 3600
             matched.append(np.hstack([pix_det[si], pix_det_err[si],
                                         np.array([fov_stars['RA_ICRS'][min_ind],
                                                   fov_stars['DE_ICRS'][min_ind],
-                                                  fov_stars['e_RA_ICRS'][min_ind],
-                                                  fov_stars['e_DE_ICRS'][min_ind],
-                                                  fov_stars['RADEcor'][min_ind]])]))
+                                                  fov_stars['e_RA_ICRS'][min_ind] / 1e3 / 3600,
+                                                  fov_stars['e_DE_ICRS'][min_ind] / 1e3 / 3600,
+                                                  0.0])]))
+                                                  # fov_stars['RADEcor'][min_ind]])]))
             mask_matched.append(min_ind)
 
     matched = np.array(matched)
-    # print(matched)
+    print('matched objects:')
+    print(matched)
     print('total matched:', len(matched))
+
+    ''' try BRIEF matching '''
+    if False:
+        from skimage.feature import (match_descriptors, corner_peaks, corner_harris,
+                                     plot_matches, BRIEF, blob_log)
+
+        keypoints1 = corner_peaks(corner_harris(detected), min_distance=5)
+        print(keypoints1.shape)
+        print(keypoints1)
+        # keypoints2 = corner_peaks(corner_harris(reference), min_distance=5)
+        keypoints1 = blob_log(detected, max_sigma=30, num_sigma=10, threshold=.1)
+        print(keypoints1.shape)
+        print(keypoints1)
+        keypoints2 = blob_log(reference, max_sigma=30, num_sigma=10, threshold=.1)
+
+        extractor = BRIEF()
+
+        extractor.extract(detected, keypoints1)
+        keypoints1 = keypoints1[extractor.mask]
+        descriptors1 = extractor.descriptors
+
+        extractor.extract(reference, keypoints2)
+        keypoints2 = keypoints2[extractor.mask]
+        descriptors2 = extractor.descriptors
+
+        matches12 = match_descriptors(descriptors1, descriptors2, cross_check=True)
+
+        fig = plt.figure('BRIEF matches')
+        ax = fig.add_subplot(111)
+        plot_matches(ax, detected, reference, keypoints1, keypoints2, matches12)
+        ax.axis('off')
+        ax.set_title("Detected vs Reference")
 
     ''' plot fake images used to detect shift '''
     fig = plt.figure('fake detected')
@@ -579,6 +795,19 @@ if __name__ == '__main__':
     ax.set_axis_off()
     fig.add_axes(ax)
     ax.imshow(scale_image(detected, correction='local'), cmap=plt.cm.magma, origin='lower', interpolation='nearest')
+
+    # apply shift:
+    if False:
+        import multiprocessing
+        _nthreads = multiprocessing.cpu_count()
+        shifted = image_registration.fft_tools.shiftnd(detected, (shift[0], shift[1]),
+                                                       nthreads=_nthreads, use_numpy_fft=False)
+        fig = plt.figure('fake detected with estimated offset')
+        fig.set_size_inches(4, 4, forward=False)
+        ax = plt.Axes(fig, [0., 0., 1., 1.])
+        ax.set_axis_off()
+        fig.add_axes(ax)
+        ax.imshow(scale_image(shifted, correction='local'), cmap=plt.cm.magma, origin='lower', interpolation='nearest')
 
     fig = plt.figure('fake reference')
     fig.set_size_inches(4, 4, forward=False)
@@ -589,25 +818,353 @@ if __name__ == '__main__':
 
     # also plot matched objects:
     pix_matched, mag_matched = plot_field(target=star_sc, window_size=[fov_size_ref, fov_size_ref], _model_psf=None,
-                                  grid_stars=fov_stars[mask_matched], _highlight_brighter_than_mag=16.0, scale_bar=False,
-                                  scale_bar_size=20, _display_plot=True, _save_plot=False, path='./', name='field')
+                                          grid_stars=fov_stars[mask_matched], num_pix=1024,
+                                          _highlight_brighter_than_mag=None, scale_bar=False,
+                                          scale_bar_size=20, _display_plot=False, _save_plot=False,
+                                          path='./', name='field')
 
     ''' solve field '''
-    import pyBA
-    objectsA = np.array([pyBA.Bivarg(mu=ix[0:2], sigma=ix[2:5]) for ix in matched])
-    objectsB = np.array([pyBA.Bivarg(mu=ix[5:7], sigma=ix[7:10]) for ix in matched])
-
-    S = pyBA.background.suggest_mapping(objectsA, objectsB)
-    print(S.mu)
-    # print(S.sigma)
-
-    # Get maximum a posteriori background mapping parameters
-    P = pyBA.background.MAP(objectsA, objectsB, mu0=S.mu, prior=pyBA.Bgmap(), norm_approx=True)
-    print(P.mu)
-
-    # Create astrometric mapping object
-    D = pyBA.Amap(P, objectsA, objectsB)
-    D.scale = 100
-    nres = 30  # Density of interpolation grid points
-
     # plt.show()
+    # a priori RA/Dec positions:
+    X = matched[:, 5:7]
+    # measured CCD positions centered around zero:
+    Y = matched[:, 0:2] - (np.array(preview_img.shape) / 2.0)
+
+    # initial parameters of the linear transform + distortion:
+    # p0 = np.array([star_sc.ra.deg, star_sc.dec.deg,
+    #                1. / (0.017 / 3600. * 0.999),
+    #                -1. / (0.017 / 3600. * 0.002),
+    #                1. / (0.017 / 3600. * 0.002),
+    #                1. / (0.017 / 3600. * 0.999),
+    #                1e-6, 1e-6, 1e-5,
+    #                1e-6, 1e-6, 1e-5])
+    p0 = np.array([star_sc.ra.deg, star_sc.dec.deg,
+                   -1. / (0.017 / 3600. * 0.999),
+                   1. / (0.017 / 3600. * 0.002),
+                   1. / (0.017 / 3600. * 0.002),
+                   1. / (0.017 / 3600. * 0.999),
+                   -3e-6, 5e-6, 1e-6,
+                   1e-5, -1e-5, 1e-5])
+    # p0 = np.array([star_sc.ra.deg, star_sc.dec.deg,
+    #                1. / (0.017 * 2048/preview_img.shape[0] / 3600. * 0.999),
+    #                -1. / (0.017 * 2048/preview_img.shape[0] / 3600. * 0.002),
+    #                1. / (0.017 * 2048/preview_img.shape[0] / 3600. * 0.002),
+    #                1. / (0.017 * 2048/preview_img.shape[0] / 3600. * 0.999),
+    #                1e-6, 1e-6, 1e-5,
+    #                1e-6, 1e-6, 1e-5])
+
+    ''' estimate linear transform parameters + 2nd order distortion '''
+    # TODO: add weights depending on sextractor error?
+    plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13)
+    print(plsq[0])
+
+    # print(residual(plsq[0], Y, X))
+
+    ''' plot the result '''
+    M_m1 = np.matrix([[plsq[0][2], plsq[0][3]], [plsq[0][4], plsq[0][5]]])
+    M = np.linalg.pinv(M_m1)
+    print('M:', M)
+    print('M^-1:', M_m1)
+
+    Q, R = np.linalg.qr(M)
+    # print(Q)
+    # print(R)
+
+    Y_C = compute_detector_position(plsq[0], X).T + preview_img.shape[0]/2
+    Y_tan = compute_detector_position(plsq[0], np.array([list(plsq[0][0:2])])).T + preview_img.shape[0]/2
+    # print(Y_C)
+    # print(Y_tan)
+    # print('max UV: ', compute_detector_position(plsq[0], np.array([[205.573314, 28.370672],
+    #                                                                [205.564369, 28.361843]])))
+
+    # for i, tmp in enumerate(sou_calib):
+    #     # ax.plot(Y_C[i, 0] - 1, Y_C[i, 1] - 1,
+    #     ax.plot(Y_C[i, 0], Y_C[i, 1], 'o', markersize=out['table']['FWHM_IMAGE'][tmp[0]] / 4,
+    #             markeredgewidth=3, markerfacecolor='None', markeredgecolor=plt.cm.Blues(0.8),
+    #             label='Linear+distortion simultaneously')
+    # # plot field center
+    # ax.plot(Y_tan[0], Y_tan[1], 'x', markersize=out['table']['FWHM_IMAGE'][tmp[0]] / 4,
+    #         markeredgewidth=3, markerfacecolor='None', markeredgecolor=plt.cm.Oranges(0.8),
+    #         label='estimated field center')
+    # plt.tight_layout(pad=1.0)
+    # plt.tight_layout()
+
+    print('Estimate linear + distortion simultaneously:')
+    theta = np.arccos(Q[1, 1]) * 180 / np.pi
+    print('rotation angle: {:.5f} degrees'.format(theta))
+    s = np.mean((R[0, 0], R[1, 1])) * 3600
+    print('pixel scale: {:.7f}\" -- mean, {:.7f}\" -- x, {:.7f}\" -- y'.format(s,
+                                                                               R[0, 0] * 3600,
+                                                                               R[1, 1] * 3600))
+    size = s * preview_img.shape[0]
+    print('image size for mean pixel scale: {:.4f}\" x {:.4f}\"'.format(size, size))
+    print('image size: {:.4f}\" x {:.4f}\"'.format(R[0, 0] * 3600 * preview_img.shape[0],
+                                                   R[1, 1] * 3600 * preview_img.shape[1]))
+
+    ''' plot estimated distortion map '''
+    A_02, A_11, A_20, B_02, B_11, B_20 = plsq[0][6:]
+
+    uv_mod_max = 0.005
+    uv_linspace = np.linspace(-uv_mod_max, uv_mod_max, 30)
+    # distortion_map = np.zeros()
+    distortion_map_F = np.zeros((len(uv_linspace), len(uv_linspace)))
+    distortion_map_G = np.zeros((len(uv_linspace), len(uv_linspace)))
+    distortion_map_color = np.zeros((len(uv_linspace), len(uv_linspace)))
+
+    for i, _u in enumerate(uv_linspace):
+        for j, _v in enumerate(uv_linspace):
+            ksieta = (M_m1 * np.array([[_u], [_v]]))
+            F = A_02 * ksieta[1] ** 2 + A_11 * ksieta[0] * ksieta[1] + A_20 * ksieta[0] ** 2
+            G = B_02 * ksieta[1] ** 2 + B_11 * ksieta[0] * ksieta[1] + B_20 * ksieta[0] ** 2
+            distortion_map_F[i, j] = F
+            distortion_map_G[i, j] = G
+            distortion_map_color[i, j] = np.sqrt(F ** 2 + G ** 2) * np.sign(G)  # y-direction denotes color
+
+    fig2 = plt.figure('Linear + distortion estimated simultaneously', figsize=(7, 7), dpi=120)
+    ax2 = fig2.add_subplot(111)
+    # single color:
+    ax2.quiver(uv_linspace, uv_linspace, distortion_map_F, distortion_map_G,  # data
+               color=plt.cm.Blues(0.8),  # color='Teal',
+               headlength=7)  # length of the arrows
+    # multicolor
+    # ax2.quiver(uv_linspace, uv_linspace, distortion_map_F, distortion_map_G,  # data
+    #            distortion_map_color, cmap=plt.cm.seismic,
+    #            headlength=7)  # length of the arrows
+
+    # plt.title('Quiver Plot of the Estimated Distortion Map')
+
+    # plt.show(fig2)
+
+    ''' test the solution '''
+    fov_center = SkyCoord(ra=plsq[0][0], dec=plsq[0][1], unit=(u.deg, u.deg), frame='icrs')
+    detected_solution = make_image(target=fov_center, window_size=[fov_size_det, fov_size_det], _model_psf=None,
+                                   pix_stars=pix_det, mag_stars=mag_det, num_pix=preview_img.shape[0])
+    fig = plt.figure('detected stars')
+    fig.set_size_inches(4, 4, forward=False)
+    ax = plt.Axes(fig, [0., 0., 1., 1.])
+    ax.set_axis_off()
+    fig.add_axes(ax)
+    ax.imshow(scale_image(detected_solution, correction='local'), cmap=plt.cm.magma,
+              origin='lower', interpolation='nearest')
+    ax.plot(Y_C[:, 0], Y_C[:, 1], 'o', markersize=6,
+            markeredgewidth=1, markerfacecolor='None', markeredgecolor=plt.cm.Blues(0.8),
+            label='Linear+distortion simultaneously')
+
+    ''' make a (numerical) map (x,y) -> (u,v) '''
+    @jit
+    def residual_inverse_map_xy_uv(p, M, p_inverse, xy_linspace):
+
+        a_01, a_02, a_11, a_10, a_20, b_01, b_02, b_11, b_10, b_20 = p
+        A_02, A_11, A_20, B_02, B_11, B_20 = p_inverse
+
+        res = np.zeros(len(xy_linspace) ** 2)
+        M_m1 = np.linalg.pinv(M)
+
+        xv, yv = np.meshgrid(xy_linspace, xy_linspace, sparse=False, indexing='xy')
+
+        for i in range(len(xy_linspace)):
+            for j in range(len(xy_linspace)):
+                x = xv[j, i]
+                y = yv[j, i]
+                f = a_01 * y + a_02 * y ** 2 + a_11 * x * y + a_10 * x + a_20 * x ** 2
+                g = b_01 * y + b_02 * y ** 2 + b_11 * x * y + b_10 * x + b_20 * x ** 2
+                uv = M * np.array([[x + f], [y + g]])
+                # print(uv)
+
+                ksieta = M_m1 * uv
+                F = A_02 * ksieta[1] ** 2 + A_11 * ksieta[0] * ksieta[1] + A_20 * ksieta[0] ** 2
+                G = B_02 * ksieta[1] ** 2 + B_11 * ksieta[0] * ksieta[1] + B_20 * ksieta[0] ** 2
+                x_c = ksieta[0] + F
+                y_c = ksieta[1] + G
+
+                res[i * len(xy_linspace) + j] = float(np.sqrt((x - x_c) ** 2 + (y - y_c) ** 2))
+
+        # print('mean error in pix: ', np.mean(res), '\nsum of e^2: ', np.sum(res**2))
+
+        return res
+
+    # initial parameters for distortion
+    # p0 = [1e-4, 1e-6, 1e-6, 1e-4, 1e-5,
+    #       1e-4, 1e-6, 1e-6, 1e-4, 1e-5]
+    p0 = [1e-4, 1e-6, 1e-7, 1e-7, 1e-6,
+          1e-4, 1e-6, 1e-6, 1e-5, 1e-5]
+    # xy_linspace = np.linspace(1, 2048, 30)
+    xy_linspace = np.linspace(-1024, 1024, 30)
+
+    # execute once for "jit to happen"
+    # for i in range(3):
+    #     tic = _time()
+    #     residual_inverse_map_xy_uv(p0, M, plsq[0][6:], xy_linspace)
+    #     print(_time() - tic)
+    residual_inverse_map_xy_uv(p0, M, plsq[0][6:], xy_linspace)
+
+    # run lsqrt estimation of mapping parameters
+    # plsq_inverse = leastsq(residual_inverse_map_xy_uv, p0,
+    #                        args=(M, plsq[0][6:], xy_linspace), maxfev=150)
+    # best estimate:
+    # plsq_inverse = (np.array([-7.8730574242135546e-05, 1.6739809945514789e-06,
+    #                           -1.9638469711488499e-08, 5.6147572815095856e-06,
+    #                           1.1562096854108367e-06, 1.6917947345178044e-03,
+    #                           -2.6065393907218176e-05, 6.4954883952398105e-06,
+    #                           -4.5911421583810606e-04, -3.5974854928856988e-05]), 5)
+    plsq_inverse = (np.array([2.0329677243543589e-08, 7.2072010293158654e-08,
+                              -5.8616871850289164e-07, 2.0611255096058385e-04,
+                              -1.1786163956914184e-05, 2.5133219448017527e-03,
+                              -3.6051783118192822e-05, 7.2491660939103119e-06,
+                              2.2510260984021737e-05, -2.8895716369256968e-05]), 5)
+
+    print(plsq_inverse)
+
+    residual_inverse_map_xy_uv(plsq_inverse[0], M, plsq[0][6:], xy_linspace)
+
+    # @jit
+    def map_xy_all_sky(p, M, sx, sy, xy_linspace):
+
+        a_01, a_02, a_11, a_10, a_20, b_01, b_02, b_11, b_10, b_20 = p
+
+        xv, yv = np.meshgrid(xy_linspace, xy_linspace, sparse=False, indexing='xy')
+        vu, vv = np.zeros_like(xv), np.zeros_like(yv)
+
+        for i in range(len(xy_linspace)):
+            for j in range(len(xy_linspace)):
+                x = xv[j, i]
+                y = yv[j, i]
+                f = a_01 * y + a_02 * y ** 2 + a_11 * x * y + a_10 * x + a_20 * x ** 2
+                g = b_01 * y + b_02 * y ** 2 + b_11 * x * y + b_10 * x + b_20 * x ** 2
+                uv = M * np.array([[(x + f) / sx],
+                                   [(y + g) / sy]])
+                vu[j, i] = uv[0]
+                vv[j, i] = uv[1]
+                # print(i,j)
+
+        return vu, vv
+
+    # def map_xy_all_sky2(p, M, sx, sy, xy_linspace):
+    #
+    #     xv, yv = np.meshgrid(xy_linspace, xy_linspace, sparse=False, indexing='xy')
+    #     vu, vv = np.zeros_like(xv), np.zeros_like(yv)
+    #
+    #     for i in range(len(xy_linspace)):
+    #         for j in range(len(xy_linspace)):
+    #             xy = [xv[j, i], yv[j, i]]
+    #             uv = map_xy_sky(p, M, sx, sy, xy)
+    #             vu[j, i] = uv[0]
+    #             vv[j, i] = uv[1]
+    #             # print(i,j)
+    #
+    #     return vu, vv
+    #
+    # @jit
+    # def map_xy_sky(p, M, sx, sy, xy):
+    #
+    #     a_01, a_02, a_11, a_10, a_20, b_01, b_02, b_11, b_10, b_20 = p
+    #
+    #     x = xy[0]
+    #     y = xy[1]
+    #     f = a_01 * y + a_02 * y ** 2 + a_11 * x * y + a_10 * x + a_20 * x ** 2
+    #     g = b_01 * y + b_02 * y ** 2 + b_11 * x * y + b_10 * x + b_20 * x ** 2
+    #     uv = M * np.array([[(x + f) / sx],
+    #                        [(y + g) / sy]])
+    #
+    #     return uv
+
+    # for i in range(3):
+    #     tic = _time()
+    #     map_xy_sky(plsq_inverse[0], M, -R[0, 0], R[1, 1], [100, 200])
+    #     print(_time() - tic)
+
+    # print(map_xy_sky(plsq_inverse[0], M, -R[0, 0], R[1, 1], [100, 200]))
+
+    fig4 = plt.figure('M13 without distortion', figsize=(9, 9))
+    ax4 = fig4.add_subplot(111)
+    # vu, vv = map_xy_all_sky(plsq_inverse[0], M, -R[0, 0], R[1, 1], np.linspace(1, 2048, 2048))
+    # jit happens:
+    # print('lala')
+    # from time import time as _time
+    # tic = _time()
+    # map_xy_all_sky(plsq_inverse[0], M, -R[0, 0], R[1, 1], np.linspace(-199, 200, 400))
+    # print(_time() - tic)
+    # tic = _time()
+    # map_xy_all_sky2(plsq_inverse[0], M, -R[0, 0], R[1, 1], np.linspace(-199, 200, 400))
+    # print(_time() - tic)
+
+    print('Generating (x,y) -> (u,v) map')
+    drizzled = False
+    nx = preview_img.shape[0]
+    pixel_range = np.linspace(-nx // 2 + 1, nx // 2, nx)
+    if not drizzled:
+        vu, vv = map_xy_all_sky(plsq_inverse[0], M, -R[0, 0], R[1, 1], pixel_range)
+    else:
+        vu, vv = map_xy_all_sky(plsq_inverse[0], M/2, -R[0, 0]/2, R[1, 1]/2, pixel_range)
+
+    print('interpolating to a regular grid')
+    # interpolate into regular grid:
+    from scipy.interpolate import griddata
+
+    xx, yy = np.mgrid[-nx // 2 + 1: nx // 2: 1, -nx // 2 + 1: nx // 2: 1]
+
+    preview_img_no_distortion = griddata((np.ravel(vu), np.ravel(vv)), np.ravel(preview_img),
+                                         (xx, yy), method='cubic', fill_value=0)
+    print(preview_img_no_distortion.shape)
+
+    # export undistorted image
+    export_fits(os.path.join(path_in, fits_in.replace('.fits', '.undistorted.fits')),
+                preview_img_no_distortion)
+
+    # ax4.pcolormesh(vu + nx//2, vv + nx//2, np.sqrt(np.sqrt(preview_img)), cmap='gray')
+    # ax4.pcolormesh(vu, vv, np.sqrt(np.sqrt(preview_img)), cmap='gray')
+    # plt.axis([vu.min(), vu.max(), vv.min(), vv.max()])
+    ax4.imshow(np.sqrt(np.sqrt(preview_img_no_distortion)), cmap=plt.cm.magma, origin='lower', interpolation='nearest')
+    ax.axis('off')
+
+    '''
+    # pyBA will be useful when analysing night-to-night data with an established distortion solution,
+    # but likely not the initial mapping image plane -> sky
+    '''
+    if False:
+        import pyBA
+
+        # measured CCD positions centered around zero:
+        objectsA = np.array([pyBA.Bivarg(mu=ix[0:2] - preview_img.shape, sigma=ix[2:5]) for ix in matched])
+        # objectsA = np.array([pyBA.Bivarg(mu=ix[0:2], sigma=ix[2:5]) for ix in matched])
+        objectsB = np.array([pyBA.Bivarg(mu=ix[5:7], sigma=ix[7:10]) for ix in matched])
+        # print(objectsA)
+        # print(objectsB)
+
+        S = pyBA.background.suggest_mapping(objectsA, objectsB)
+        print('\napriori mapping:')
+        print(S.mu)
+        # print(S.sigma)
+
+        # Get maximum a posteriori background mapping parameters
+        P = pyBA.background.MAP(objectsA, objectsB, mu0=S.mu, prior=pyBA.Bgmap(), norm_approx=True)
+        print('\naposteriori mapping:')
+        print(P.mu)
+        # print(P.sigma)
+
+        # Create astrometric mapping object
+        D = pyBA.Amap(P, objectsA, objectsB)
+        # D.scale = 100
+        nres = 30  # Density of interpolation grid points
+        # D.condition()
+
+        from pyBA.plotting import make_grid
+        from pyBA.distortion import realise, d2, astrometry_cov
+
+        x, y = make_grid(objectsA, res=nres)
+        xyarr = np.array([x.flatten(), y.flatten()]).T
+
+        # vx, vy = realise(xyarr, D.P, D.scale, D.amp)
+        d2_grid = d2(xyarr, xyarr)
+        C = astrometry_cov(d2_grid, D.scale, D.amp)
+
+        # Show mean function (the background transformation)
+        # D.draw_background(res=nres)
+
+        # Plot residuals
+        # D.draw_residuals(res=nres)
+
+        # Draw realisation of distortion map after observation
+        # D.draw_realisation(res=nres)
+
+    plt.show()

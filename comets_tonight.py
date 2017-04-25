@@ -5,7 +5,7 @@ A good friend of mine
 Follows the stars,
 Venus and Mars are alright tonight!
 
-Produce a _nightly_ list of observable planets/moons brighter than 16 mag
+Produce a _nightly_ list of observable comets brighter than 16 mag
 for the Robo-AO queue
 
 @autor: Dr Dmitry A. Duev [Caltech]
@@ -73,7 +73,7 @@ if __name__ == '__main__':
                           _observatory=observatory, _m_lim=m_lim, _elv_lim=elv_lim, _date=today)
     # get all bright targets given m_lim and check observability given elv_lim, twilight and fraction
     mask = None
-    tl.target_list(today, mask, _parallel=False, _epoch='J2000', _output_Vmag=True, _night_grid_n=40,
+    tl.target_list(today, mask, _parallel=True, _epoch='J2000', _output_Vmag=True, _night_grid_n=40,
                    _twilight=twilight, _fraction=fraction)
 
     ''' make/change XML files '''

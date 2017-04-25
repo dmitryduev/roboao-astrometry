@@ -8,6 +8,10 @@ import requests
 import argparse
 import json
 import inspect
+import lxml.html as lh
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
+from dicttoxml import dicttoxml
 from collections import OrderedDict
 from pypride.vintflib import pleph, lagint
 from pypride.classes import inp_set, constants
@@ -43,6 +47,7 @@ import gc
 import warnings
 
 import matplotlib
+
 # to display stuff internally:
 # matplotlib.use('Qt5Agg')
 # to run externally without X-server:
@@ -50,6 +55,7 @@ matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
 import aplpy
+
 # import image_registration
 
 warnings.filterwarnings("ignore")
@@ -66,6 +72,56 @@ with suspend_cache(Vizier):
     viz = Vizier()
     viz.ROW_LIMIT = -1
     viz.TIMEOUT = 30
+
+
+def is_planet_or_moon(name):
+    """
+
+    :param name: body name
+    :return:
+    """
+    planets = ('mercury', 'venus', 'earth', 'mars', 'jupiter',
+               'saturn', 'uranus', 'neptune')
+    moons = ('moon',
+             'deimos', 'phobos',
+             'europa', 'io', 'ganymede', 'callisto',
+             'titan', 'enceladus', 'dione', 'hyperion', 'iapetus', 'mimas', 'rhea', 'tethys',
+             'miranda', 'ariel', 'umbriel', 'oberon', 'titania')
+
+    if name.lower() in planets or 'pluto' in name.lower() or name.lower() in moons:
+        return True
+    else:
+        return False
+
+
+def is_multiple_asteroid(name):
+    """
+
+    :param name:
+    :param _f_base:
+    :return:
+    """
+    try:
+        # as of Nov 15, 2016
+        binary_list = 'http://www.johnstonsarchive.net/astro/asteroidmoonslist2.html'
+
+        response = urllib2.urlopen(binary_list)
+        response_html = response.read()
+
+        doc = lh.document_fromstring(response_html)
+        a = doc.xpath('./body/center/table/tr/td/ul/li/a')
+        binaries = ['_'.join(aa.text_content().split(',')[0].split('and')[0]
+                             .strip().split()).replace('(', '').replace(')', '') for aa in a]
+
+    except Exception as err:
+        print(str(err))
+        print('could not get the binary asteroid list.')
+        return False
+
+    if name in binaries:
+        return True
+    else:
+        return False
 
 
 def GTRS_to_GCRS(date_utc, eop_int, dTAIdCT=1.0, mode='der1'):
@@ -375,9 +431,10 @@ def great_circle_distance(phi1, lambda1, phi2, lambda2):
     # input: dec1, ra1, dec2, ra2 [rad]
     # this is orders of magnitude faster than astropy.coordinates.Skycoord.separation
     delta_lambda = np.abs(lambda2 - lambda1)
-    return np.arctan2(np.sqrt((np.cos(phi2)*np.sin(delta_lambda))**2
-                              + (np.cos(phi1)*np.sin(phi2) - np.sin(phi1)*np.cos(phi2)*np.cos(delta_lambda))**2),
-                      np.sin(phi1)*np.sin(phi2) + np.cos(phi1)*np.cos(phi2)*np.cos(delta_lambda))
+    return np.arctan2(np.sqrt((np.cos(phi2) * np.sin(delta_lambda)) ** 2
+                              + (
+                              np.cos(phi1) * np.sin(phi2) - np.sin(phi1) * np.cos(phi2) * np.cos(delta_lambda)) ** 2),
+                      np.sin(phi1) * np.sin(phi2) + np.cos(phi1) * np.cos(phi2) * np.cos(delta_lambda))
 
 
 @jit
@@ -394,7 +451,7 @@ def find_min(fun):
     jmax = np.argmin(fun)
 
     # first or last element?
-    if jmax == 0 or jmax == len(fun)-1:
+    if jmax == 0 or jmax == len(fun) - 1:
         return jmax, mx, jmax, mx
 
     # if not - make a cubic fit
@@ -529,9 +586,9 @@ def generate_image(xy, mag, xy_ast=None, mag_ast=None, exp=None, nx=2048, ny=204
 
 # @jit
 def dms(rad):
-    d, m = divmod(abs(rad), np.pi/180)
-    m, s = divmod(m, np.pi/180/60)
-    s /= np.pi/180/3600
+    d, m = divmod(abs(rad), np.pi / 180)
+    m, s = divmod(m, np.pi / 180 / 60)
+    s /= np.pi / 180 / 3600
     if rad >= 0:
         return [d, m, s]
     else:
@@ -542,9 +599,9 @@ def dms(rad):
 def hms(rad):
     if rad < 0:
         rad += np.pi
-    h, m = divmod(rad, np.pi/12)
-    m, s = divmod(m, np.pi/12/60)
-    s /= np.pi/12/3600
+    h, m = divmod(rad, np.pi / 12)
+    m, s = divmod(m, np.pi / 12 / 60)
+    s /= np.pi / 12 / 3600
     return [h, m, s]
 
 
@@ -794,7 +851,6 @@ class Observer(Observer_astroplan):
 
 
 def load_eops(_cat_eop, _date):
-
     # get the relevant eop entries from the catalog:
     with open(_cat_eop, 'r') as fc:
         fc_lines = fc.readlines()
@@ -822,6 +878,7 @@ class Target(object):
     """
         Store data for a single object at epoch
     """
+
     def __init__(self, _object):
         self.object = _object
         # position at the middle of the night:
@@ -893,12 +950,12 @@ class Target(object):
                                 ['meridian_crossing', str(self.meridian_crossing).lower()],
                                 ['is_observable', str(self.is_observable).lower()],
                                 ['guide_stars', []]
-                               ])
+                                ])
         # save the date:
         out_dict['comment'] = 'modified_{:s}_UTC'.format(str(datetime.datetime.utcnow()))
         if self.guide_stars is not None:
             for star in self.guide_stars[::-1]:
-                radec = [hms(star[1][0]*np.pi/180), dms(star[1][1]*np.pi/180)]
+                radec = [hms(star[1][0] * np.pi / 180), dms(star[1][1] * np.pi / 180)]
                 ra_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(*radec[0])
                 if radec[1][0] >= 0:
                     dec_str = '{:02.0f}:{:02.0f}:{:06.3f}'.format(radec[1][0], abs(radec[1][1]), abs(radec[1][2]))
@@ -970,7 +1027,7 @@ class Target(object):
         for t_d, el in zip(t_dense, dense):
             # print(t_d, el)
             # above elevation cut-off and the Sun is down?
-            if el >= _elv_lim*np.pi/180.0 and night[0] <= t_0 + t_d * dt <= night[1]:
+            if el >= _elv_lim * np.pi / 180.0 and night[0] <= t_0 + t_d * dt <= night[1]:
                 scan.append(t_d)
                 # print('appended ', t_d, ' for ', el)
             else:
@@ -1061,13 +1118,13 @@ class Target(object):
             # print(t_start, t_stop, window_t_span)
 
             # first, 'split' the trajectory into separate positions that are ~radius_rad/2 apart
-            t_step = (radius_rad/2.0 * window_t_span) / arc_len.rad
+            t_step = (radius_rad / 2.0 * window_t_span) / arc_len.rad
             n_positions = int(np.ceil(arc_len.rad / radius_rad)) * 2
             print('split asteroid trajectory into {:d} pointings'.format(n_positions))
             radecs = []
             radec_dots = []
             for ii in range(n_positions):
-                ti = t_start + t_step*ii
+                ti = t_start + t_step * ii
                 rd, rddot, _ = self.object.raDecVmag(ti.mjd, _jpl_eph, epoch='J2000',
                                                      station=_station, output_Vmag=False,
                                                      _cat_eop=_cat_eop)
@@ -1085,7 +1142,7 @@ class Target(object):
             # no, no, no, asteroids don't do great circles :(
             # middle, radec_middle = great_circle_segment_midpoint(radec_start_sc, radec_stop_sc)
             # print('middle from great circle:', middle, radec_middle)
-            t_middle = t_start + t_step*(n_positions//2)
+            t_middle = t_start + t_step * (n_positions // 2)
             radec_middle, _, _ = self.object.raDecVmag(t_middle.mjd, _jpl_eph, epoch='J2000',
                                                        station=_station, output_Vmag=False,
                                                        _cat_eop=_cat_eop)
@@ -1176,11 +1233,11 @@ class Target(object):
                     print('{:s}:'.format(self.object.name), star['Source'], 'is close enough!')
 
                     index_min, _, index_min_interpolated, distance_track = find_min(separations)
-                    t_approach_star = t_start + t_step*index_min_interpolated
+                    t_approach_star = t_start + t_step * index_min_interpolated
                     # get relevant derivatives ([almost] at the time of closest encounter):
                     radec_dot = radec_dots[index_min]
                     # asteroid apparent velocity along track ["/s] around t_closest_encounter:
-                    v_along_track = np.sqrt(radec_dot[0]**2 + radec_dot[1]**2)
+                    v_along_track = np.sqrt(radec_dot[0] ** 2 + radec_dot[1] ** 2)
 
                     # arc length from closest point to star on star track (extension)
                     # to furthest such that distance to it <= radius_rad:
@@ -1191,7 +1248,7 @@ class Target(object):
 
                     # TODO: do not add if it's too short. need to be clever to check t_span vs asteroid mag
                     # shorter than 10 seconds? skip...
-                    if t_span.sec*2 < 20:
+                    if t_span.sec * 2 < 20:
                         print('window time span shorter than 20 seconds, skipping')
                         continue
 
@@ -1205,14 +1262,14 @@ class Target(object):
                                              distance_track * 180.0 / np.pi * 3600, [t_start_star, t_stop_star],
                                              'not available'])
 
-            # if False:
-            #     self.plot_field(middle, window_size=window_size,
-            #                     radec_start=radec_start, vmag_start=vmag_start,
-            #                     radec_stop=radec_stop, vmag_stop=vmag_stop,
-            #                     exposure=t_stop-t_start,
-            #                     _model_psf=_model_psf, grid_stars=grid_stars,
-            #                     _highlight_brighter_than_mag=_m_lim_gs,
-            #                     _display_plot=True)
+                    # if False:
+                    #     self.plot_field(middle, window_size=window_size,
+                    #                     radec_start=radec_start, vmag_start=vmag_start,
+                    #                     radec_stop=radec_stop, vmag_stop=vmag_stop,
+                    #                     exposure=t_stop-t_start,
+                    #                     _model_psf=_model_psf, grid_stars=grid_stars,
+                    #                     _highlight_brighter_than_mag=_m_lim_gs,
+                    #                     _display_plot=True)
 
         # keep 3 closest and 3 brightest, plot 'finding charts'
         if len(self.guide_stars) > 0:
@@ -1371,7 +1428,7 @@ class Target(object):
         # with RA inverted to correspond to previews
         # for upsampled 2048x2048
         # w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
-                             # [8.9799574245829621e-09, 4.8009647689165968e-06]])
+        # [8.9799574245829621e-09, 4.8009647689165968e-06]])
         # 1024x1024
         w.wcs.cd = np.array([[4.9653758578816782e-06, 7.8012027500556068e-08],
                              [8.9799574245829621e-09, 4.8009647689165968e-06]]) * 2
@@ -1910,7 +1967,7 @@ class TargetListAsteroids(TargetList):
                 radec_dots = np.array(radec_dots)
                 Vmags = np.array(Vmags)
 
-                print(len(self.database)-ia, _time() - tic)
+                print(len(self.database) - ia, _time() - tic)
                 # skip if too dim
                 if np.min(Vmags) <= self.m_lim:
                     observable, meridian_transit, azels = self.observability(night_grid, radecs, Vmags,
@@ -1935,7 +1992,7 @@ class TargetListAsteroids(TargetList):
 
             self.targets = np.append(self.targets, target)
             # self.targets.append(target)
-        # print('targets:', self.targets)
+            # print('targets:', self.targets)
 
     def get_obs_params(self, target, _mjd, epoch='J2000', output_Vmag=True):
         """ Compute obs parameters for a given t
@@ -2034,7 +2091,7 @@ class TargetListComets(TargetList):
                 radec_dots = np.array(radec_dots)
                 Vmags = np.array(Vmags)
 
-                print(len(self.database)-ia, _time() - tic)
+                print(len(self.database) - ia, _time() - tic)
                 # skip if too dim
                 if np.min(Vmags) <= self.m_lim:
                     observable, meridian_transit, azels = self.observability(night_grid, radecs, Vmags,
@@ -2059,7 +2116,7 @@ class TargetListComets(TargetList):
 
             self.targets = np.append(self.targets, target)
             # self.targets.append(target)
-        # print('targets:', self.targets)
+            # print('targets:', self.targets)
 
     def get_obs_params(self, target, _mjd, epoch='J2000', output_Vmag=True):
         """ Compute obs parameters for a given t
@@ -2091,14 +2148,14 @@ class TargetListComets(TargetList):
         radec, radec_dot, Vmag = comet.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
                                                  epoch=epoch, output_Vmag=output_Vmag, _cat_eop=self.inp['cat_eop'])
 
-        print(target['name'], [Angle(radec[0], unit=u.rad).hms, Angle(radec[1], unit=u.rad).dms],
-              radec_dot, Vmag, Time(_mjd, format='mjd', scale='tdb').utc.datetime)
+        # FIXME: debugging output
+        # print(target['name'], [Angle(radec[0], unit=u.rad).hms, Angle(radec[1], unit=u.rad).dms],
+        #       radec_dot, Vmag, Time(_mjd, format='mjd', scale='tdb').utc.datetime)
 
         return radec, radec_dot, Vmag
 
 
 class MinorBodyDatabase(object):
-
     def __init__(self):
         self.database = None
         self.f_database = None
@@ -2184,7 +2241,6 @@ class MinorBodyDatabase(object):
 
 
 class AsteroidDatabaseJPL(MinorBodyDatabase):
-
     def __init__(self, _path_local='./', _f_database='ELEMENTS.NUMBR'):
         # initialize super class
         super(AsteroidDatabaseJPL, self).__init__()
@@ -2282,7 +2338,6 @@ class AsteroidDatabaseJPL(MinorBodyDatabase):
 
 
 class AsteroidDatabaseMPC(MinorBodyDatabase):
-
     def __init__(self, _path_local='./', _f_database='PHA.txt'):
         super(AsteroidDatabaseMPC, self).__init__()
 
@@ -2300,6 +2355,7 @@ class AsteroidDatabaseMPC(MinorBodyDatabase):
         :param epoch_str:
         :return:
         """
+
         def l2num(l):
             try:
                 num = int(l)
@@ -2356,7 +2412,7 @@ class AsteroidDatabaseMPC(MinorBodyDatabase):
                                   # + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
                                   + (str(entry[137:141]),) + (str(entry[166:194]).strip(),)
                                   + (str(entry[194:202]).strip(),)
-                                 for entry in database], dtype=dt)
+                                  for entry in database], dtype=dt)
 
     def get_one(self, _name):
         """
@@ -2396,21 +2452,21 @@ class AsteroidDatabaseMPC(MinorBodyDatabase):
                                ('rms', '|S21'), ('name', '|S21'), ('last_obs', '|S21')
                                ])
                 asteroid_entry = np.array(
-                                        [(str(entry[:7]).strip(),)
-                                         + (float(entry[8:13]) if len(entry[8:13].strip()) > 0 else 20.0,)
-                                         + (float(entry[14:19]) if len(entry[14:19].strip()) > 0 else 0.15,)
-                                         + (self.unpack_epoch(str(entry[20:25])),)
-                                         + (float(entry[26:35]),) + (float(entry[37:46]),)
-                                         + (float(entry[48:57]),) + (float(entry[59:68]),) + (float(entry[70:79]),)
-                                         + (float(entry[80:91]) if len(entry[80:91].strip()) > 0 else 0,)
-                                         + (float(entry[92:103]) if len(entry[92:103].strip()) > 0 else 0,)
-                                         + (str(entry[105:106]),)
-                                         + (int(entry[117:122]) if len(entry[117:122].strip()) > 0 else 0,)
-                                         + (int(entry[123:126]) if len(entry[123:126].strip()) > 0 else 0,)
-                                         + (str(entry[127:136]).strip(),)
-                                         # + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
-                                         + (str(entry[137:141]),) + (str(entry[166:194]).strip(),)
-                                         + (str(entry[194:202]).strip(),)], dtype=dt)
+                    [(str(entry[:7]).strip(),)
+                     + (float(entry[8:13]) if len(entry[8:13].strip()) > 0 else 20.0,)
+                     + (float(entry[14:19]) if len(entry[14:19].strip()) > 0 else 0.15,)
+                     + (self.unpack_epoch(str(entry[20:25])),)
+                     + (float(entry[26:35]),) + (float(entry[37:46]),)
+                     + (float(entry[48:57]),) + (float(entry[59:68]),) + (float(entry[70:79]),)
+                     + (float(entry[80:91]) if len(entry[80:91].strip()) > 0 else 0,)
+                     + (float(entry[92:103]) if len(entry[92:103].strip()) > 0 else 0,)
+                     + (str(entry[105:106]),)
+                     + (int(entry[117:122]) if len(entry[117:122].strip()) > 0 else 0,)
+                     + (int(entry[123:126]) if len(entry[123:126].strip()) > 0 else 0,)
+                     + (str(entry[127:136]).strip(),)
+                     # + (str(entry[137:141]),) + (str(entry[166:194]).strip().replace(' ', '_'),)
+                     + (str(entry[137:141]),) + (str(entry[166:194]).strip(),)
+                     + (str(entry[194:202]).strip(),)], dtype=dt)
                 # initialize MinorBody object here:
                 return self.init_minor_body(asteroid_entry)
 
@@ -2432,7 +2488,6 @@ class AsteroidDatabaseMPC(MinorBodyDatabase):
 
 
 class CometDatabaseMPC(MinorBodyDatabase):
-
     def __init__(self, _path_local='./', _f_database='CometEls.txt'):
         super(MinorBodyDatabase, self).__init__()
 
@@ -2578,7 +2633,7 @@ class MinorBody(object):
 
     def __init__(self, name, e, i, w, Node, GM, t0, a=None, M0=None, q=None, tau=None, H=None, G=None):
         """
-        
+
         :param name: 
         :param e: 
         :param i: 
@@ -2592,7 +2647,7 @@ class MinorBody(object):
         :param tau: 
         :param H: 
         :param G:
-         
+
             For asteroids, a and M0 are given
             For comets, q and tau are given
         """
@@ -2675,7 +2730,7 @@ class MinorBody(object):
         while (np.abs(H - tmp_H) > 1e-9) or (n_iter <= max_iter):
             tmp_H = deepcopy(H)
             # tmp_Q = deepcopy(Q)
-            H = np.log(np.sqrt(Q**2 + 1) + Q)
+            H = np.log(np.sqrt(Q ** 2 + 1) + Q)
             Q = (H + M) / e
             n_iter += 1
 
@@ -2732,16 +2787,16 @@ class MinorBody(object):
             # mean motion:
             n = np.sqrt(self.GM / (2.0 * self.q))
             # focal parameter:
-            p = (4.0*self.GM / (n**2))**(1.0/3.0)
+            p = (4.0 * self.GM / (n ** 2)) ** (1.0 / 3.0)
             # mean anomaly at t given pericenter passage epoch:
             M = n * (t - self.tau)
-            Q = 2.0/3.0 * M
-            R = (np.sqrt(1.0 + Q**2) + np.abs(Q))**(2.0/3.0)
-            S = 3.0 * M / (R + 1.0 + 1.0/R)
+            Q = 2.0 / 3.0 * M
+            R = (np.sqrt(1.0 + Q ** 2) + np.abs(Q)) ** (2.0 / 3.0)
+            S = 3.0 * M / (R + 1.0 + 1.0 / R)
             # get true anomaly and distance from focus:
             sinv = 2.0 * S / (1.0 + S ** 2)
             cosv = (1.0 - S ** 2) / (1.0 + S ** 2)
-            r = p*(1 + cosv)
+            r = p * (1 + cosv)
             # r = p*(1.0 + S**2) / 2
 
         elif (self.e > 1.0) and (self.q is not None) and (self.tau is not None):
@@ -2989,7 +3044,7 @@ class MinorBody(object):
             m1 = H + 5 log (delta) + 2.5G log (r)
             delta: geocentric distance
             r: heliocentric distance
-            
+
              T-mag N-mag =
                Comet's approximate apparent visual total magnitude ("T-mag") and nuclear
             magnitude ("N-mag") by following standard IAU definitions:
@@ -3275,7 +3330,7 @@ class TargetXML(object):
                         '{:s}'.format(getModefromMag(target[4]))
 
                 target_xml_path = os.path.join(self.path, targetNames[name])
-            #                print target_xml_path
+            # print target_xml_path
 
             # create a new xml file
             else:
@@ -3347,8 +3402,8 @@ class TargetXML(object):
             ind_obs_start = [i for i, v in enumerate(target_xml) if '<Observation>' in v]
             ind_obs_stop = [i for i, v in enumerate(target_xml) if '</Observation>' in v]
             for (start, stop) in zip(ind_obs_start, ind_obs_stop):
-                ind_num_obs = [i+start for i, v in enumerate(target_xml[start:stop])
-                                    if '<number>' in v]
+                ind_num_obs = [i + start for i, v in enumerate(target_xml[start:stop])
+                               if '<number>' in v]
                 if len(ind_num_obs) > 1:
                     for ind in ind_num_obs[:0:-1]:
                         target_xml.insert(ind, '\t\t</Observation>\n\t\t<Observation>')
@@ -3364,7 +3419,7 @@ class TargetXML(object):
         try:
             r = requests.get(self.server, auth=('admin', 'robo@0'))
             if int(r.status_code) != 200:
-                    print('server error')
+                print('server error')
         except Exception:
             print('failed to connect to the website.')
             return 1
@@ -3379,7 +3434,7 @@ class TargetXML(object):
         # iterate over target xml files
         target_nums_to_remove = []
 
-        target_list_xml = ['Target_{:d}.xml'.format(i+1) for i in range(int(pnot))]
+        target_list_xml = ['Target_{:d}.xml'.format(i + 1) for i in range(int(pnot))]
 
         for targ_num, target_xml in enumerate(target_list_xml):
             tree = ET.parse(os.path.join(self.path, target_xml))
@@ -3412,11 +3467,11 @@ class TargetXML(object):
                 t_xml = datetime.datetime.now() - datetime.timedelta(days=10)
             # updated > 2 days ago?
             if (datetime.datetime.now() - t_xml).total_seconds() > 86400 * 2:
-            # if (datetime.datetime.now() - t_xml).total_seconds() > 86400*2 \
-            #         and targ['done'] == '0' \
-            #         and targ['Object'][0]['Observation'][0]['repeated'] == '0':
+                # if (datetime.datetime.now() - t_xml).total_seconds() > 86400*2 \
+                #         and targ['done'] == '0' \
+                #         and targ['Object'][0]['Observation'][0]['repeated'] == '0':
                 # print(targ['comment'], targ['done'])
-                target_nums_to_remove.append(targ_num+1)
+                target_nums_to_remove.append(targ_num + 1)
 
         # now remove the xml files. start from end not to scoop numbering
         if len(target_nums_to_remove) > 0:
@@ -3434,7 +3489,7 @@ class TargetXML(object):
                 # call main page to modify/fix Programs.xml
                 r = requests.get(self.server, auth=('admin', 'robo@0'))
                 if int(r.status_code) != 200:
-                        print('server error')
+                    print('server error')
             except Exception:
                 print('failed to remove targets via the website.')
 
@@ -3559,4 +3614,4 @@ if __name__ == '__main__':
         # force garbage collection:
         # gc.collect()
 
-    # client.shutdown()
+        # client.shutdown()
