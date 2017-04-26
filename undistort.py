@@ -95,8 +95,8 @@ if __name__ == '__main__':
                         2.2510260984021737e-05, -2.8895716369256968e-05])
 
     # linear transformation matrix:
-    M = np.matrix([[-9.9323517968454041e-06, 7.9417855014320687e-08],
-                   [1.6680156730738286e-08, 9.6989368165198861e-06]])
+    M = np.matrix([[-9.9411769544196640e-06, 9.3382713752932988e-08],
+                   [1.6755094972110852e-08, 9.6818838309733057e-06]])
 
     # scale matrix:
     Q, R = np.linalg.qr(M)
@@ -108,6 +108,7 @@ if __name__ == '__main__':
     else:
         vu, vv = map_xy_all_sky(mapping, M / 2, -R[0, 0] / 2, R[1, 1] / 2, pixel_range)
 
+    # interpolate into a regular grid
     # xx, yy = np.mgrid[-nx // 2 + 1: nx // 2: 1, -nx // 2 + 1: nx // 2: 1]
     xx, yy = np.mgrid[0:nx:1, 0:nx:1] - nx // 2
 

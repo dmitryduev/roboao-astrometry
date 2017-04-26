@@ -576,6 +576,48 @@ def compute_detector_position(p, x):
     return y_C.T
 
 
+def fit_bootstrap(_residual, p0, datax, datay, yerr_systematic=0.0, n_samp=100):
+
+    # Fit first time
+    pfit, perr = leastsq(_residual, p0, args=(datax, datay), full_output=0, ftol=1.49012e-13, xtol=1.49012e-13)
+
+    # Get the stdev of the residuals
+    residuals = residual(pfit, datax, datay)
+    sigma_res = np.std(residuals)
+
+    sigma_err_total = np.sqrt(sigma_res**2 + yerr_systematic**2)
+
+    # n_samp random data sets are generated and fitted
+    ps = []
+    for ii in range(n_samp):
+
+        randomDelta = np.random.normal(0., sigma_err_total, size=datay.shape)
+        randomdataY = datay + randomDelta
+
+        randomfit, randomcov = leastsq(_residual, p0, args=(datax, randomdataY), full_output=0,
+                                       ftol=1.49012e-13, xtol=1.49012e-13)
+        # randomfit, randomcov = leastsq(_residual, pfit, args=(datax, randomdataY), full_output=0,
+        #                                ftol=1.49012e-13, xtol=1.49012e-13)
+
+        ps.append(randomfit)
+
+    ps = np.array(ps)
+    mean_pfit = np.mean(ps, 0)
+
+    # You can choose the confidence interval that you want for your
+    # parameter estimates:
+    # 1sigma corresponds to 68.3% confidence interval
+    # 2sigma corresponds to 95.44% confidence interval
+    Nsigma = 1.
+
+    err_pfit = Nsigma * np.std(ps, 0)
+
+    pfit_bootstrap = mean_pfit
+    perr_bootstrap = err_pfit
+
+    return pfit_bootstrap, perr_bootstrap
+
+
 if __name__ == '__main__':
     path_in = '/Users/dmitryduev/_caltech/roboao/_faint_reductions/20170211/0_M13_VIC_Si_o_20170211_122715.043747/'
     # fits_in = '100p.fits'
@@ -855,10 +897,48 @@ if __name__ == '__main__':
 
     ''' estimate linear transform parameters + 2nd order distortion '''
     # TODO: add weights depending on sextractor error?
-    plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13)
+    print('solving with LSQ')
+    plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=False)
+    # print(plsq)
     print(plsq[0])
+    print('residuals:')
+    residuals = residual(plsq[0], Y, X)
+    print(residuals)
 
-    # print(residual(plsq[0], Y, X))
+    for jj in range(2):
+        # identify outliers. they are likely to be false identifications, so discard them and redo the fit
+        print('flagging outliers and refitting, take {:d}'.format(jj+1))
+        mask_outliers = residuals <= 5  # pix
+
+        # flag:
+        X = X[mask_outliers, :]
+        Y = Y[mask_outliers, :]
+
+        # plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=False)
+        plsq = leastsq(residual, plsq[0], args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=False)
+        print(plsq[0])
+        print('residuals:')
+        residuals = residual(plsq[0], Y, X)
+        print(residuals)
+
+        # get an estimate of the covariance matrix:
+        pcov = plsq[1]
+        if (len(X) > len(p0)) and pcov is not None:
+            s_sq = (residuals ** 2).sum() / (len(X) - len(p0))
+            pcov = pcov * s_sq
+        else:
+            pcov = np.inf
+        print('covariance matrix estimate:')
+        print(pcov)
+
+    # apply bootstrap to get a reasonable estimate of what the errors of the estimated parameters are
+    print('solving with LSQ bootstrap')
+    plsq_bootstrap, err_bootstrap = fit_bootstrap(residual, p0, Y, X, yerr_systematic=0.0, n_samp=100)
+    print(plsq_bootstrap)
+    print(err_bootstrap)
+    print('residuals:')
+    residuals = residual(plsq_bootstrap, Y, X)
+    print(residuals)
 
     ''' plot the result '''
     M_m1 = np.matrix([[plsq[0][2], plsq[0][3]], [plsq[0][4], plsq[0][5]]])
