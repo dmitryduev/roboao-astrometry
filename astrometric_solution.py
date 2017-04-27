@@ -576,28 +576,34 @@ def compute_detector_position(p, x):
     return y_C.T
 
 
-def fit_bootstrap(_residual, p0, datax, datay, yerr_systematic=0.0, n_samp=100):
+def fit_bootstrap(_residual, p0, datax, datay, yerr_systematic=0.0, n_samp=100, _scaling=None):
 
     # Fit first time
-    pfit, perr = leastsq(_residual, p0, args=(datax, datay), full_output=0, ftol=1.49012e-13, xtol=1.49012e-13)
+    _p = leastsq(_residual, p0, args=(datax, datay), full_output=True, ftol=1.49012e-13, xtol=1.49012e-13)
+
+    pfit, perr = _p[0], _p[1]
 
     # Get the stdev of the residuals
-    residuals = residual(pfit, datax, datay)
+    residuals = _residual(pfit, datax, datay)
     sigma_res = np.std(residuals)
 
     sigma_err_total = np.sqrt(sigma_res**2 + yerr_systematic**2)
 
     # n_samp random data sets are generated and fitted
     ps = []
+    # print('lala')
+    # print(datay)
     for ii in range(n_samp):
 
-        randomDelta = np.random.normal(0., sigma_err_total, size=datay.shape)
-        randomdataY = datay + randomDelta
+        randomDelta = np.random.normal(0., sigma_err_total, size=datax.shape)
+        # print(ii)
+        randomdataX = datax + randomDelta
+        # print(randomDelta)
+        # raw_input()
 
-        randomfit, randomcov = leastsq(_residual, p0, args=(datax, randomdataY), full_output=0,
-                                       ftol=1.49012e-13, xtol=1.49012e-13)
-        # randomfit, randomcov = leastsq(_residual, pfit, args=(datax, randomdataY), full_output=0,
-        #                                ftol=1.49012e-13, xtol=1.49012e-13)
+        _p = leastsq(_residual, p0, args=(randomdataX, datay), full_output=True,
+                     ftol=1.49012e-13, xtol=1.49012e-13, diag=_scaling)
+        randomfit, randomcov = _p[0], _p[1]
 
         ps.append(randomfit)
 
@@ -733,7 +739,8 @@ if __name__ == '__main__':
                                   grid_stars=fov_stars, num_pix=preview_img.shape[0], _highlight_brighter_than_mag=None,
                                   scale_bar=False, scale_bar_size=20, _display_plot=False, _save_plot=False,
                                   path='./', name='field')
-    print(pix_ref)
+    if False:
+        print(pix_ref)
 
     # brightest 20:
     # tic = _time()
@@ -754,7 +761,8 @@ if __name__ == '__main__':
     #                       pix_stars=pix_det, mag_stars=mag_det)
     naxis_det = int(preview_img.shape[0] * (fov_size_det * 180.0 / np.pi * 3600) / 36)
     naxis_ref = int(preview_img.shape[0] * (fov_size_ref * 180.0 / np.pi * 3600) / 36)
-    print(naxis_det, naxis_ref)
+    if False:
+        print(naxis_det, naxis_ref)
     # effectively shift detected positions to center of ref frame to reduce distortion effect
     pix_det_ref = pix_det + np.array([naxis_ref//2, naxis_ref//2]) - np.array([naxis_det//2, naxis_det//2])
     detected = make_image(target=star_sc, window_size=[fov_size_ref, fov_size_ref], _model_psf=None,
@@ -776,7 +784,8 @@ if __name__ == '__main__':
         s_shifted = s + np.array(shift[::-1])
 
         pix_distance = np.min(np.linalg.norm(pix_ref - s_shifted, axis=1))
-        print(pix_distance)
+        if False:
+            print(pix_distance)
 
         # note: because of larger distortion in the y-direction, pix diff there is larger than in x
         # if pix_distance < 25 * preview_img.shape[0] / 1024:  # 25:
@@ -794,8 +803,9 @@ if __name__ == '__main__':
             mask_matched.append(min_ind)
 
     matched = np.array(matched)
-    print('matched objects:')
-    print(matched)
+    if False:
+        print('matched objects:')
+        print(matched)
     print('total matched:', len(matched))
 
     ''' try BRIEF matching '''
@@ -897,12 +907,23 @@ if __name__ == '__main__':
 
     ''' estimate linear transform parameters + 2nd order distortion '''
     # TODO: add weights depending on sextractor error?
+    print('testing')
+    # scaling params to help leastsq land on a good solution
+    scaling = [1e-2, 1e-2, 1e-5, 1e-3, 1e-2, 1e-5, 3e6, 5e6, 1e6, 1e5, 1e5, 1e5]
+    plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=True,
+                   diag=scaling)
+    # print(plsq)
+    print('residuals:')
+    residuals = plsq[2]['fvec']
+    print(residuals)
+
     print('solving with LSQ')
-    plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=False)
+    plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=True)
     # print(plsq)
     print(plsq[0])
     print('residuals:')
-    residuals = residual(plsq[0], Y, X)
+    # residuals = residual(plsq[0], Y, X)
+    residuals = plsq[2]['fvec']
     print(residuals)
 
     for jj in range(2):
@@ -914,11 +935,12 @@ if __name__ == '__main__':
         X = X[mask_outliers, :]
         Y = Y[mask_outliers, :]
 
-        # plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=False)
-        plsq = leastsq(residual, plsq[0], args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=False)
+        # plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=True)
+        plsq = leastsq(residual, plsq[0], args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=True)
         print(plsq[0])
         print('residuals:')
-        residuals = residual(plsq[0], Y, X)
+        # residuals = residual(plsq[0], Y, X)
+        residuals = plsq[2]['fvec']
         print(residuals)
 
         # get an estimate of the covariance matrix:
@@ -928,8 +950,9 @@ if __name__ == '__main__':
             pcov = pcov * s_sq
         else:
             pcov = np.inf
-        print('covariance matrix estimate:')
-        print(pcov)
+        print('covariance matrix diagonal estimate:')
+        # print(pcov)
+        print(pcov.diagonal())
 
     # apply bootstrap to get a reasonable estimate of what the errors of the estimated parameters are
     print('solving with LSQ bootstrap')
@@ -939,6 +962,9 @@ if __name__ == '__main__':
     print('residuals:')
     residuals = residual(plsq_bootstrap, Y, X)
     print(residuals)
+
+    # FIXME: use bootstrapped solution:
+    plsq = (plsq_bootstrap, err_bootstrap, plsq[2:])
 
     ''' plot the result '''
     M_m1 = np.matrix([[plsq[0][2], plsq[0][3]], [plsq[0][4], plsq[0][5]]])
@@ -1063,12 +1089,13 @@ if __name__ == '__main__':
 
         return res
 
+    print('making a numerical map (x,y) -> (u,v)')
+
     # initial parameters for distortion
     # p0 = [1e-4, 1e-6, 1e-6, 1e-4, 1e-5,
     #       1e-4, 1e-6, 1e-6, 1e-4, 1e-5]
-    p0 = [1e-4, 1e-6, 1e-7, 1e-7, 1e-6,
-          1e-4, 1e-6, 1e-6, 1e-5, 1e-5]
-    # xy_linspace = np.linspace(1, 2048, 30)
+    p0 = np.array([1e-4, 1e-6, 1e-7, 1e-7, 1e-6,
+                   1e-4, 1e-6, 1e-6, 1e-5, 1e-5])
     xy_linspace = np.linspace(-1024, 1024, 30)
 
     # execute once for "jit to happen"
@@ -1078,24 +1105,69 @@ if __name__ == '__main__':
     #     print(_time() - tic)
     residual_inverse_map_xy_uv(p0, M, plsq[0][6:], xy_linspace)
 
-    # run lsqrt estimation of mapping parameters
-    # plsq_inverse = leastsq(residual_inverse_map_xy_uv, p0,
-    #                        args=(M, plsq[0][6:], xy_linspace), maxfev=150)
+    # run lsqrs estimation of mapping parameters
+    # [feed everything except for field center]
+    plsq_inverse = leastsq(residual_inverse_map_xy_uv, p0, args=(M, plsq[0][6:], xy_linspace), full_output=True,
+                           ftol=1.49012e-13, xtol=1.49012e-13)  # , maxfev=300)
     # best estimate:
     # plsq_inverse = (np.array([-7.8730574242135546e-05, 1.6739809945514789e-06,
     #                           -1.9638469711488499e-08, 5.6147572815095856e-06,
     #                           1.1562096854108367e-06, 1.6917947345178044e-03,
     #                           -2.6065393907218176e-05, 6.4954883952398105e-06,
     #                           -4.5911421583810606e-04, -3.5974854928856988e-05]), 5)
-    plsq_inverse = (np.array([2.0329677243543589e-08, 7.2072010293158654e-08,
-                              -5.8616871850289164e-07, 2.0611255096058385e-04,
-                              -1.1786163956914184e-05, 2.5133219448017527e-03,
-                              -3.6051783118192822e-05, 7.2491660939103119e-06,
-                              2.2510260984021737e-05, -2.8895716369256968e-05]), 5)
+    # plsq_inverse = (np.array([2.0329677243543589e-08, 7.2072010293158654e-08,
+    #                           -5.8616871850289164e-07, 2.0611255096058385e-04,
+    #                           -1.1786163956914184e-05, 2.5133219448017527e-03,
+    #                           -3.6051783118192822e-05, 7.2491660939103119e-06,
+    #                           2.2510260984021737e-05, -2.8895716369256968e-05]), 5)
 
+    print(plsq_inverse[0])
+
+    def fit_bootstrap_inverse(_residual, p0, _params, _params_std, _xy_linspace, n_samp=100, _scaling=None):
+
+        # n_samp random data sets are generated and fitted
+        ps = []
+        for ii in range(n_samp):
+            # We'll use stdev of the params (known from direct bootstrap estimation) to perturb them:
+            deltas = np.array([np.random.normal(0., _pstd) for _pstd in _params_std])
+            # print(ii)
+            _params_perturbed = _params + deltas
+
+            _M_m1 = np.matrix([[_params_perturbed[0], _params_perturbed[1]],
+                               [_params_perturbed[2], _params_perturbed[3]]])
+            _M = np.linalg.pinv(_M_m1)
+
+            _p = leastsq(_residual, p0, args=(_M, _params_perturbed[4:], _xy_linspace),
+                         full_output=True, ftol=1.49012e-13, xtol=1.49012e-13, diag=_scaling)
+            randomfit, randomcov = _p[0], _p[1]
+
+            ps.append(randomfit)
+
+        ps = np.array(ps)
+        mean_pfit = np.mean(ps, 0)
+
+        # You can choose the confidence interval that you want for your
+        # parameter estimates:
+        # 1sigma corresponds to 68.3% confidence interval
+        # 2sigma corresponds to 95.44% confidence interval
+        Nsigma = 1.
+
+        err_pfit = Nsigma * np.std(ps, 0)
+
+        pfit_bootstrap = mean_pfit
+        perr_bootstrap = err_pfit
+
+        return pfit_bootstrap, perr_bootstrap
+
+    # bootstrap!
+    print('bootstrapping the inverse map:')
+    plsq_bootstrap, err_bootstrap = fit_bootstrap_inverse(residual_inverse_map_xy_uv, p0,
+                                                          plsq[0][2:], plsq[1][2:], xy_linspace, n_samp=10)
+    # FIXME: use the bootstrapped solution:
+    plsq_inverse = (plsq_bootstrap, err_bootstrap, plsq_inverse[2:])
     print(plsq_inverse)
 
-    residual_inverse_map_xy_uv(plsq_inverse[0], M, plsq[0][6:], xy_linspace)
+    # residual_inverse_map_xy_uv(plsq_inverse[0], M, plsq[0][6:], xy_linspace)
 
     # @jit
     def map_xy_all_sky(p, M, sx, sy, xy_linspace):
