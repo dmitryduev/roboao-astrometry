@@ -463,6 +463,67 @@ def triangulate(xy, cut=None, max_pix=None):
     return quads
 
 
+def residual_possible_wrong(p, y, x):
+    """
+        Simultaneously solve for RA_tan, DEC_tan, M, and 2nd-order distortion params
+    :param p:
+    :param y:
+    :param x:
+    :return:
+    """
+    # convert (ra, dec)s to 3d
+    r = np.vstack((np.cos(x[:, 0]*np.pi/180.0)*np.cos(x[:, 1]*np.pi/180.0),
+                   np.sin(x[:, 0]*np.pi/180.0)*np.cos(x[:, 1]*np.pi/180.0),
+                   np.sin(x[:, 1]*np.pi/180.0))).T
+    # print(r.shape)
+    # print(r)
+
+    # the same for the tangent point
+    t = np.array((np.cos(p[0]*np.pi/180.0)*np.cos(p[1]*np.pi/180.0),
+                  np.sin(p[0]*np.pi/180.0)*np.cos(p[1]*np.pi/180.0),
+                  np.sin(p[1]*np.pi/180.0)))
+    # print(t)
+
+    k = np.array([0, 0, 1])
+
+    # u,v projections
+    u = np.cross(t, k) / np.linalg.norm(np.cross(t, k))
+    v = np.cross(u, t)
+    # print(u, v)
+
+    R = r / (np.dot(r, t)[:, None])
+
+    # print(R)
+
+    # native tangent-plane coordinates:
+    UV = 180.0/np.pi * np.vstack((np.dot(R, u), np.dot(R, v))).T
+
+    # print(UV)
+
+    M_m1 = np.matrix([[p[2], p[3]], [p[4], p[5]]])
+    M = np.linalg.pinv(M_m1)
+    # print(M)
+
+    x_tan = M * np.array([[p[0]], [p[1]]])
+    # x_tan = np.array([[0], [0]])
+    # print(x_tan)
+
+    ksieta = (M_m1 * UV.T).T
+    y_C = []
+    A_02, A_11, A_20, B_02, B_11, B_20 = p[6:]
+
+    for i in range(ksieta.shape[0]):
+        ksi_i = ksieta[i, 0]
+        eta_i = ksieta[i, 1]
+        x_i = ksi_i + x_tan[0] + A_02 * eta_i ** 2 + A_11 * ksi_i * eta_i + A_20 * ksi_i ** 2
+        y_i = eta_i + x_tan[1] + B_02 * eta_i ** 2 + B_11 * ksi_i * eta_i + B_20 * ksi_i ** 2
+        y_C.append([x_i, y_i])
+    y_C = np.squeeze(np.array(y_C))
+
+    # return np.linalg.norm(y.T - (M_m1 * UV.T + x_tan), axis=0)
+    return np.linalg.norm(y.T - y_C.T, axis=0)
+
+
 def residual(p, y, x):
     """
         Simultaneously solve for RA_tan, DEC_tan, M, and 2nd-order distortion params
@@ -501,12 +562,67 @@ def residual(p, y, x):
     # print(UV)
 
     M_m1 = np.matrix([[p[2], p[3]], [p[4], p[5]]])
+    M = np.linalg.pinv(M_m1)
+    # print(M)
+
+    x_tan = M * np.array([[p[0]], [p[1]]])
+    # x_tan = np.array([[0], [0]])
+    # print(x_tan)
+
+    ksieta = (M_m1 * UV.T).T
+    y_C = []
+    A_01, A_02, A_11, A_10, A_20, B_01, B_02, B_11, B_10, B_20 = p[6:]
+
+    for i in range(ksieta.shape[0]):
+        ksi_i = ksieta[i, 0]
+        eta_i = ksieta[i, 1]
+        x_i = ksi_i + x_tan[0] + A_01 * eta_i + A_02 * eta_i ** 2 + A_11 * ksi_i * eta_i \
+                               + A_10 * ksi_i + A_20 * ksi_i ** 2
+        y_i = eta_i + x_tan[1] + B_01 * eta_i + B_02 * eta_i ** 2 + B_11 * ksi_i * eta_i \
+                               + B_10 * ksi_i + B_20 * ksi_i ** 2
+        y_C.append([x_i, y_i])
+    y_C = np.squeeze(np.array(y_C))
+
+    # return np.linalg.norm(y.T - (M_m1 * UV.T + x_tan), axis=0)
+    return np.linalg.norm(y.T - y_C.T, axis=0)
+
+
+def compute_detector_position_possibly_wrong(p, x):
+    # convert (ra, dec)s to 3d
+    r = np.vstack((np.cos(x[:, 0] * np.pi / 180.0) * np.cos(x[:, 1] * np.pi / 180.0),
+                   np.sin(x[:, 0] * np.pi / 180.0) * np.cos(x[:, 1] * np.pi / 180.0),
+                   np.sin(x[:, 1] * np.pi / 180.0))).T
+    # print(r.shape)
+    # print(r)
+
+    # the same for the tangent point
+    t = np.array((np.cos(p[0] * np.pi / 180.0) * np.cos(p[1] * np.pi / 180.0),
+                  np.sin(p[0] * np.pi / 180.0) * np.cos(p[1] * np.pi / 180.0),
+                  np.sin(p[1] * np.pi / 180.0)))
+    # print(t)
+
+    k = np.array([0, 0, 1])
+
+    # u,v projections
+    u = np.cross(t, k) / np.linalg.norm(np.cross(t, k))
+    v = np.cross(u, t)
+    # print(u, v)
+
+    R = r / (np.dot(r, t)[:, None])
+
+    # print(R)
+
+    # native tangent-plane coordinates:
+    UV = 180.0 / np.pi * np.vstack((np.dot(R, u), np.dot(R, v))).T
+
+    # print('UV: ', UV)
+
+    M_m1 = np.matrix([[p[2], p[3]], [p[4], p[5]]])
     # M = np.linalg.pinv(M_m1)
     # print(M)
 
-    # x_tan = M * np.array([[p[0]], [p[1]]])
-    x_tan = np.array([[0], [0]])
-    # print(x_tan)
+    x_tan = M * np.array([[p[0]], [p[1]]])
+    # x_tan = np.array([[0], [0]])
 
     ksieta = (M_m1 * UV.T).T
     y_C = []
@@ -520,8 +636,7 @@ def residual(p, y, x):
         y_C.append([x_i, y_i])
     y_C = np.squeeze(np.array(y_C))
 
-    # return np.linalg.norm(y.T - (M_m1 * UV.T + x_tan), axis=0)
-    return np.linalg.norm(y.T - y_C.T, axis=0)
+    return y_C.T
 
 
 def compute_detector_position(p, x):
@@ -558,19 +673,22 @@ def compute_detector_position(p, x):
     # M = np.linalg.pinv(M_m1)
     # print(M)
 
-    # x_tan = M * np.array([[p[0]], [p[1]]])
-    x_tan = np.array([[0], [0]])
+    x_tan = M * np.array([[p[0]], [p[1]]])
+    # x_tan = np.array([[0], [0]])
 
     ksieta = (M_m1 * UV.T).T
     y_C = []
-    A_02, A_11, A_20, B_02, B_11, B_20 = p[6:]
+    A_01, A_02, A_11, A_10, A_20, B_01, B_02, B_11, B_10, B_20 = p[6:]
 
     for i in range(ksieta.shape[0]):
         ksi_i = ksieta[i, 0]
         eta_i = ksieta[i, 1]
-        x_i = ksi_i + x_tan[0] + A_02 * eta_i ** 2 + A_11 * ksi_i * eta_i + A_20 * ksi_i ** 2
-        y_i = eta_i + x_tan[1] + B_02 * eta_i ** 2 + B_11 * ksi_i * eta_i + B_20 * ksi_i ** 2
+        x_i = ksi_i + x_tan[0] + A_01 * eta_i + A_02 * eta_i ** 2 + A_11 * ksi_i * eta_i \
+              + A_10 * ksi_i + A_20 * ksi_i ** 2
+        y_i = eta_i + x_tan[1] + B_01 * eta_i + B_02 * eta_i ** 2 + B_11 * ksi_i * eta_i \
+              + B_10 * ksi_i + B_20 * ksi_i ** 2
         y_C.append([x_i, y_i])
+
     y_C = np.squeeze(np.array(y_C))
 
     return y_C.T
@@ -625,9 +743,12 @@ def fit_bootstrap(_residual, p0, datax, datay, yerr_systematic=0.0, n_samp=100, 
 
 
 if __name__ == '__main__':
-    path_in = '/Users/dmitryduev/_caltech/roboao/_faint_reductions/20170211/0_M13_VIC_Si_o_20170211_122715.043747/'
-    # fits_in = '100p.fits'
-    fits_in = '0_M13_VIC_Si_o_20170211_122715.043747_blind_decnv.fits'
+    # path_in = '/Users/dmitryduev/_caltech/roboao/_faint_reductions/20170211/0_M13_VIC_Si_o_20170211_122715.043747/'
+    # # fits_in = '100p.fits'
+    # fits_in = '0_M13_VIC_Si_o_20170211_122715.043747_blind_decnv.fits'
+
+    path_in = '/Users/dmitryduev/_caltech/roboao/_faint_reductions/20170604/0_M13_VIC_Si_o_20170604_084940.042100/'
+    fits_in = '0_M13_VIC_Si_o_20170604_084940.042100_blind_decnv.fits'
 
     # see /usr/local/Cellar/sextractor/2.19.5/share/sextractor/default.sex
 
@@ -723,7 +844,10 @@ if __name__ == '__main__':
     print('nominal FoV center', star_sc)
 
     # solved for:
-    star_sc = SkyCoord(ra=2.5042127035557536e+02, dec=3.6454708339784595e+01, unit=(u.deg, u.deg), frame='icrs')
+    # star_sc = SkyCoord(ra=2.5042127035557536e+02, dec=3.6454708339784595e+01, unit=(u.deg, u.deg), frame='icrs')
+    # star_sc = SkyCoord(ra=2.5042125679399157e+02, dec=3.6454734284688918e+01, unit=(u.deg, u.deg), frame='icrs')
+
+    star_sc = SkyCoord(ra=2.5041593116369444e+02, dec=3.6456177994034121e+01, unit=(u.deg, u.deg), frame='icrs')
 
     # search radius: " -> rad
     fov_size_ref = 100 * np.pi / 180.0 / 3600
@@ -895,8 +1019,9 @@ if __name__ == '__main__':
                    1. / (0.017 / 3600. * 0.002),
                    1. / (0.017 / 3600. * 0.002),
                    1. / (0.017 / 3600. * 0.999),
-                   -3e-6, 5e-6, 1e-6,
-                   1e-5, -1e-5, 1e-5])
+                   1e-7, 1e-7, 1e-7, 1e-7, 1e-7,
+                   1e-2, 1e-5, 1e-7, 1e-7, 1e-5])
+                   # np.array(preview_img.shape[0]) / 2.0, np.array(preview_img.shape[1]) / 2.0])
     # p0 = np.array([star_sc.ra.deg, star_sc.dec.deg,
     #                1. / (0.017 * 2048/preview_img.shape[0] / 3600. * 0.999),
     #                -1. / (0.017 * 2048/preview_img.shape[0] / 3600. * 0.002),
@@ -907,15 +1032,17 @@ if __name__ == '__main__':
 
     ''' estimate linear transform parameters + 2nd order distortion '''
     # TODO: add weights depending on sextractor error?
-    print('testing')
+    # print('testing')
     # scaling params to help leastsq land on a good solution
+    # scaling = [1e-2, 1e-2, 1e-5, 1e-3, 1e-2, 1e-5, 3e6, 5e6, 1e6, 1e5, 1e5, 1e5, 1e-2, 1e-2]
+    # scaling = [1e-2, 1e-2, 1e-5, 1e-3, 1e-2, 1e-5, 3e6, 5e6, 1e6, 1e5, 1e5, 1e5]
     scaling = [1e-2, 1e-2, 1e-5, 1e-3, 1e-2, 1e-5, 3e6, 5e6, 1e6, 1e5, 1e5, 1e5]
     plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=True,
                    diag=scaling)
     # print(plsq)
-    print('residuals:')
-    residuals = plsq[2]['fvec']
-    print(residuals)
+    # print('residuals:')
+    # residuals = plsq[2]['fvec']
+    # print(residuals)
 
     print('solving with LSQ')
     plsq = leastsq(residual, p0, args=(Y, X), ftol=1.49012e-13, xtol=1.49012e-13, full_output=True)
@@ -956,7 +1083,8 @@ if __name__ == '__main__':
 
     # apply bootstrap to get a reasonable estimate of what the errors of the estimated parameters are
     print('solving with LSQ bootstrap')
-    plsq_bootstrap, err_bootstrap = fit_bootstrap(residual, p0, Y, X, yerr_systematic=0.0, n_samp=100)
+    # plsq_bootstrap, err_bootstrap = fit_bootstrap(residual, p0, Y, X, yerr_systematic=0.0, n_samp=100)
+    plsq_bootstrap, err_bootstrap = fit_bootstrap(residual, plsq[0], Y, X, yerr_systematic=0.0, n_samp=100)
     print(plsq_bootstrap)
     print(err_bootstrap)
     print('residuals:')
@@ -979,7 +1107,7 @@ if __name__ == '__main__':
     Y_C = compute_detector_position(plsq[0], X).T + preview_img.shape[0]/2
     Y_tan = compute_detector_position(plsq[0], np.array([list(plsq[0][0:2])])).T + preview_img.shape[0]/2
     # print(Y_C)
-    # print(Y_tan)
+    print('Tangent point pixel position: ', Y_tan)
     # print('max UV: ', compute_detector_position(plsq[0], np.array([[205.573314, 28.370672],
     #                                                                [205.564369, 28.361843]])))
 
@@ -1008,7 +1136,7 @@ if __name__ == '__main__':
                                                    R[1, 1] * 3600 * preview_img.shape[1]))
 
     ''' plot estimated distortion map '''
-    A_02, A_11, A_20, B_02, B_11, B_20 = plsq[0][6:]
+    A_01, A_02, A_11, A_10, A_20, B_01, B_02, B_11, B_10, B_20 = plsq[0][6:]
 
     uv_mod_max = 0.005
     uv_linspace = np.linspace(-uv_mod_max, uv_mod_max, 30)
@@ -1029,6 +1157,7 @@ if __name__ == '__main__':
     fig2 = plt.figure('Linear + distortion estimated simultaneously', figsize=(7, 7), dpi=120)
     ax2 = fig2.add_subplot(111)
     # single color:
+    plt.axis('equal')
     ax2.quiver(uv_linspace, uv_linspace, distortion_map_F, distortion_map_G,  # data
                color=plt.cm.Blues(0.8),  # color='Teal',
                headlength=7)  # length of the arrows
@@ -1040,6 +1169,7 @@ if __name__ == '__main__':
     # plt.title('Quiver Plot of the Estimated Distortion Map')
 
     # plt.show(fig2)
+    plt.show()
 
     ''' test the solution '''
     fov_center = SkyCoord(ra=plsq[0][0], dec=plsq[0][1], unit=(u.deg, u.deg), frame='icrs')
@@ -1109,6 +1239,8 @@ if __name__ == '__main__':
     # [feed everything except for field center]
     plsq_inverse = leastsq(residual_inverse_map_xy_uv, p0, args=(M, plsq[0][6:], xy_linspace), full_output=True,
                            ftol=1.49012e-13, xtol=1.49012e-13)  # , maxfev=300)
+    # plsq_inverse = leastsq(residual_inverse_map_xy_uv, p0, args=(M, plsq[0][6:], xy_linspace), full_output=True,
+    #                        ftol=1.49012e-13, xtol=1.49012e-13, maxfev=150)
     # best estimate:
     # plsq_inverse = (np.array([-7.8730574242135546e-05, 1.6739809945514789e-06,
     #                           -1.9638469711488499e-08, 5.6147572815095856e-06,
@@ -1128,6 +1260,7 @@ if __name__ == '__main__':
         # n_samp random data sets are generated and fitted
         ps = []
         for ii in range(n_samp):
+            print('sample {:d}'.format(ii))
             # We'll use stdev of the params (known from direct bootstrap estimation) to perturb them:
             deltas = np.array([np.random.normal(0., _pstd) for _pstd in _params_std])
             # print(ii)
@@ -1159,13 +1292,14 @@ if __name__ == '__main__':
 
         return pfit_bootstrap, perr_bootstrap
 
-    # bootstrap!
-    print('bootstrapping the inverse map:')
-    plsq_bootstrap, err_bootstrap = fit_bootstrap_inverse(residual_inverse_map_xy_uv, p0,
-                                                          plsq[0][2:], plsq[1][2:], xy_linspace, n_samp=10)
-    # FIXME: use the bootstrapped solution:
-    plsq_inverse = (plsq_bootstrap, err_bootstrap, plsq_inverse[2:])
-    print(plsq_inverse)
+    # bootstrap! (this takes a lot of time to complete)
+    if False:
+        print('bootstrapping the inverse map:')
+        plsq_bootstrap, err_bootstrap = fit_bootstrap_inverse(residual_inverse_map_xy_uv, p0,
+                                                              plsq[0][2:], plsq[1][2:], xy_linspace, n_samp=10)
+        # FIXME: use the bootstrapped solution:
+        plsq_inverse = (plsq_bootstrap, err_bootstrap, plsq_inverse[2:])
+        print(plsq_inverse)
 
     # residual_inverse_map_xy_uv(plsq_inverse[0], M, plsq[0][6:], xy_linspace)
 

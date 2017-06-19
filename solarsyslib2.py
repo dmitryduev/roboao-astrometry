@@ -857,7 +857,7 @@ def load_eops(_cat_eop, _date):
     mjd_start = mjuliandate(_date.year, _date.month, _date.day)
     eops = np.zeros((7, 7))  # +/- 3 days
     for jj, line in enumerate(fc_lines):
-        if line[0] not in (' ', '*'):
+        if line[0] not in (' ', '*', '#'):
             entry = [float(x) for x in line.split()]
             if len(entry) > 0 and entry[3] == np.floor(mjd_start) - 3:
                 for kk in range(7):
