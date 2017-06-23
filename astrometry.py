@@ -520,7 +520,8 @@ if __name__ == '__main__':
     # fits_in = '0_M13_VIC_Si_o_20170211_122715.043747_blind_decnv.fits'
 
     path_in = '/Users/dmitryduev/_caltech/roboao/_faint_reductions/20170604/0_M13_VIC_Si_o_20170604_084940.042100/'
-    fits_in = '0_M13_VIC_Si_o_20170604_084940.042100_blind_decnv.fits'
+    # fits_in = '0_M13_VIC_Si_o_20170604_084940.042100_blind_decnv.fits'
+    fits_in = '0_M13_VIC_Si_o_20170604_084940.042100_blind_decnv_0.fits'
 
     # see /usr/local/Cellar/sextractor/2.19.5/share/sextractor/default.sex
 
@@ -610,6 +611,7 @@ if __name__ == '__main__':
 
     # solved for:
     star_sc = SkyCoord(ra=2.5041593116369444e+02, dec=3.6456177994034121e+01, unit=(u.deg, u.deg), frame='icrs')
+    # star_sc = SkyCoord(ra=2.5041567159848793e+02, dec=3.6455898328568495e+01, unit=(u.deg, u.deg), frame='icrs')
 
     # search radius: " -> rad
     fov_size_ref = 100 * np.pi / 180.0 / 3600
@@ -761,7 +763,11 @@ if __name__ == '__main__':
         # identify outliers. they are likely to be false identifications, so discard them and redo the fit
         print('flagging outliers and refitting, take {:d}'.format(jj+1))
         # mask_outliers = residuals <= 5  # pix
-        mask_outliers = residuals <= 9e-5  # deg
+        mask_outliers = np.abs(residuals) <= 9e-5  # deg
+        # mask_outliers = np.abs(residuals) <= 1e-4 / (jj+1)  # deg
+
+        # if not np.any(mask_outliers):
+        #     continue
 
         # flag:
         X = X[mask_outliers, :]
@@ -778,11 +784,11 @@ if __name__ == '__main__':
         if (len(X) > len(p0)) and pcov is not None:
             s_sq = (residuals ** 2).sum() / (len(X) - len(p0))
             pcov = pcov * s_sq
+            print('covariance matrix diagonal estimate:')
+            # print(pcov)
+            print(pcov.diagonal())
         else:
             pcov = np.array([np.inf])
-        print('covariance matrix diagonal estimate:')
-        # print(pcov)
-        print(pcov.diagonal())
 
     # apply bootstrap to get a reasonable estimate of what the errors of the estimated parameters are
     print('solving with LSQ bootstrap')
@@ -831,7 +837,7 @@ if __name__ == '__main__':
     x_tan, y_tan = plsq[0][2:4]
     a_02, a_11, a_20, b_02, b_11, b_20 = plsq[0][8:]
 
-    xy_mod_max = 1024
+    xy_mod_max = preview_img.shape[0] // 2
     # xy_linspace = np.linspace(-xy_mod_max, xy_mod_max, 30)
     xy_linspace = np.linspace(-xy_mod_max, xy_mod_max, 21)
     distortion_map_f = np.zeros((len(xy_linspace), len(xy_linspace)))
@@ -844,6 +850,8 @@ if __name__ == '__main__':
             # uv = np.array(
             #     M * np.array([[- x_tan + a_02 * delta_y ** 2 + a_11 * delta_x * delta_y + a_20 * delta_x ** 2],
             #                   [- y_tan + b_02 * delta_y ** 2 + b_11 * delta_x * delta_y + b_20 * delta_x ** 2]]))
+            # uv = np.array([[- x_tan + a_02 * delta_y ** 2 + 0*a_11 * delta_x * delta_y + 0*a_20 * delta_x ** 2],
+            #                [- y_tan + b_02 * delta_y ** 2 + 0*b_11 * delta_x * delta_y + b_20 * delta_x ** 2]])
             uv = np.array([[- x_tan + a_02 * delta_y ** 2 + a_11 * delta_x * delta_y + a_20 * delta_x ** 2],
                            [- y_tan + b_02 * delta_y ** 2 + b_11 * delta_x * delta_y + b_20 * delta_x ** 2]])
 
@@ -856,13 +864,16 @@ if __name__ == '__main__':
     fig2 = plt.figure('Linear + distortion estimated simultaneously', figsize=(7, 7), dpi=120)
     ax2 = fig2.add_subplot(111)
     # single color:
-    plt.axis('equal')
+    # plt.axis('equal')
     ax2.quiver(xy_linspace, xy_linspace, distortion_map_f, distortion_map_g,  # data
                color=plt.cm.Blues(0.9),  # color='Teal',
                headlength=7)  # length of the arrows
-    ax2.set_xlim([-1200, 1200])
-    ax2.set_ylim([-1200, 1200])
     ax2.set_xlabel('x [pixels]')
     ax2.set_ylabel('y [pixels]')
+    ax2.set_xlim([-640, 640])
+    ax2.set_ylim([-640, 640])
+    x0, x1 = ax2.get_xlim()
+    y0, y1 = ax2.get_ylim()
+    ax2.set_aspect(abs(x1 - x0) / abs(y1 - y0))
 
     plt.show()
