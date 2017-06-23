@@ -2,6 +2,7 @@ from __future__ import print_function
 import sewpy
 import numpy as np
 import os
+import inspect
 from skimage import exposure, img_as_float
 from copy import deepcopy
 from scipy.optimize import leastsq
@@ -522,6 +523,9 @@ if __name__ == '__main__':
     path_in = '/Users/dmitryduev/_caltech/roboao/_faint_reductions/20170604/0_M13_VIC_Si_o_20170604_084940.042100/'
     # fits_in = '0_M13_VIC_Si_o_20170604_084940.042100_blind_decnv.fits'
     fits_in = '0_M13_VIC_Si_o_20170604_084940.042100_blind_decnv_0.fits'
+
+    # path_in = abs_path = os.path.dirname(inspect.getfile(inspect.currentframe()))
+    # fits_in = '0_M13_VIC_Si_o_20170604_084940.042100_blind_decnv.fits'
 
     # see /usr/local/Cellar/sextractor/2.19.5/share/sextractor/default.sex
 
