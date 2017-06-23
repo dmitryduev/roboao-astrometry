@@ -431,7 +431,7 @@ def residual(p, x, y):
     # 2nd-order distortion parameters:
     a_02, a_11, a_20, b_02, b_11, b_20 = p[8:]
 
-    # 2d basis vectors
+    # 3d basis vectors
     i = np.array([1, 0, 0])
     j = np.array([0, 1, 0])
     k = np.array([0, 0, 1])
@@ -800,6 +800,9 @@ if __name__ == '__main__':
     residuals = residual(plsq_bootstrap, X, Y)
     print(residuals)
     print('Median residual value, mas: ', np.median(residuals)*3600*1e3)
+
+    print('Star with smallest residual: ', X[np.argmin(residuals)], Y[np.argmin(residuals)])
+    print('residual itself is {:.1f} mas'.format(residuals[np.argmin(residuals)]*3600*1e3))
 
     # FIXME: use bootstrapped solution:
     plsq = (plsq_bootstrap, err_bootstrap, plsq[2:])
