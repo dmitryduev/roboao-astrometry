@@ -27,6 +27,12 @@ def xy2uv(p, x_raw, y_raw, xy_center=(0, 0), drizzled=False):
                    [M_21, M_22]])
     if drizzled:
         M /= 2.0
+        a_02 /= 2
+        a_11 /= 2
+        a_20 /= 2
+        b_02 /= 2
+        b_11 /= 2
+        b_20 /= 2
 
     # pixel position must be WRT CCD center:
     if xy_center != (0, 0):

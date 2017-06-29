@@ -108,6 +108,9 @@ if __name__ == '__main__':
     b[0, 2] = b_02
     b[1, 1] = b_11
     b[2, 0] = b_20
+    if args.drizzled:
+        a /= 2
+        b /= 2
     ap = np.zeros((m + 1, m + 1), np.double)
     bp = np.zeros((m + 1, m + 1), np.double)
     w.sip = wcs.Sip(a, b, ap, bp, w.wcs.crpix)
