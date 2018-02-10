@@ -699,6 +699,10 @@ if __name__ == '__main__':
         print('matched objects:')
         print(matched)
     print('total matched:', len(matched))
+    median_e_RA_ICRS = np.median(matched[:, 7]) * 1e3 * 3600  # mas
+    median_e_DE_ICRS = np.median(matched[:, 8]) * 1e3 * 3600  # mas
+    print('median astrometric errors in RA, Dec, and sqrt(RA^2 + Dec^2) in mas:',
+          median_e_RA_ICRS, median_e_DE_ICRS, np.sqrt(median_e_RA_ICRS**2 + median_e_DE_ICRS**2))
 
     ''' plot fake images used to detect shift '''
     fig = plt.figure('fake detected')
@@ -872,9 +876,12 @@ if __name__ == '__main__':
     ax2 = fig2.add_subplot(111)
     # single color:
     # plt.axis('equal')
+    # ax2.quiver(xy_linspace, xy_linspace, distortion_map_f, distortion_map_g,  # data
+    #            color=plt.cm.Blues(0.9),  # color='Teal',
+    #            headlength=7)  # length of the arrows
     ax2.quiver(xy_linspace, xy_linspace, distortion_map_f, distortion_map_g,  # data
-               color=plt.cm.Blues(0.9),  # color='Teal',
-               headlength=7)  # length of the arrows
+               color=plt.cm.Blues(0.9), angles='xy', scale_units='xy', scale=0.5,  # arrows are 2x magnified
+               headlength=7)
     ax2.set_xlabel('x [pixels]')
     ax2.set_ylabel('y [pixels]')
     ax2.set_xlim([-640, 640])

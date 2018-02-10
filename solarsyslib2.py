@@ -25,6 +25,7 @@ from astropy.utils.data import clear_download_cache
 from astropy.coordinates import SkyCoord
 import astropy.coordinates as coord
 import astropy.units as u
+from astropy.units import Quantity
 from astropy import table
 from scipy.ndimage import gaussian_filter
 from astropy.convolution import convolve_fft
@@ -39,7 +40,7 @@ import math
 from copy import deepcopy
 import traceback
 from astroquery.query import suspend_cache
-from astroquery.vizier import Vizier
+from astroquery.gaia import Gaia
 import multiprocessing
 import gc
 # from distributed import Client, LocalCluster
@@ -67,11 +68,11 @@ warnings.filterwarnings("ignore")
 # client = Client(cluster)
 # client = Client('127.0.0.1:8786')
 
-# initialize Vizier object
-with suspend_cache(Vizier):
-    viz = Vizier()
-    viz.ROW_LIMIT = -1
-    viz.TIMEOUT = 30
+# initialize Gaia object
+with suspend_cache(Gaia):
+    gaia = Gaia
+    # gaia.ROW_LIMIT = -1
+    # gaia.TIMEOUT = 30
 
 
 def is_planet_or_moon(name):
@@ -1045,12 +1046,11 @@ class Target(object):
 
         self.observability_windows = scans
 
-    def set_guide_stars(self, _jpl_eph, _guide_star_cat=u'I/337/gaia', _station=None,
+    def set_guide_stars(self, _jpl_eph, _station=None,
                         _radius=30.0, _margin=30.0, _m_lim_gs=16.0, _cat_eop=None):
         """ Get guide stars within radius arc seconds for each observability window.
 
         :param _jpl_eph:
-        :param _guide_star_cat:
         :param _station:
         :param _radius: maximum distance to guide star in arcseconds
         :param _margin: padd window with margin arcsec (one-sided margin)
@@ -1063,7 +1063,7 @@ class Target(object):
         :param _cat_eop:
         :return:
         """
-        global viz
+        global gaia
 
         if self.observability_windows is None:
             print('compute observability windows first before looking for guide stars')
@@ -1168,14 +1168,12 @@ class Target(object):
                 # grid_stars = viz.query_region(target, width=window_size[0] * u.rad, height=window_size[1] * u.rad,
                 #                               catalog=_guide_star_cat)
                 # print(middle)
-                grid_stars = viz.query_region(middle, radius=np.max(window_size) * u.rad, catalog=_guide_star_cat,
-                                              cache=False)
-                if len(list(grid_stars.keys())) == 0:
+
+                grid_stars = gaia.cone_search(middle, np.max(window_size) * u.rad).get_results()
+                # print(list(grid_stars['phot_g_mean_mag']))
+                if (grid_stars is None) or (len(list(grid_stars.keys())) == 0):
                     # no stars found? proceed to next window
                     continue
-                # else pick the table with the Gaia catalogue:
-                grid_stars = grid_stars[_guide_star_cat]
-                # print(grid_stars)
             else:
                 # for large fields, 'split' the trajectory and search in a smaller field around each 'pointing'
                 # along the trajectory.
@@ -1191,18 +1189,19 @@ class Target(object):
                 for pi, pointing in enumerate(pointings[:max_pointings]):
                     print('querying pointing #{:d}'.format(pi + 1))
                     # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
-                    grid_stars_pointing = viz.query_region(pointing, radius_rad * u.rad, catalog=_guide_star_cat,
-                                                           cache=False)
-                    if len(list(grid_stars_pointing.keys())) != 0:
-                        print('number of stars in this pointing:', len(grid_stars_pointing[_guide_star_cat]))
-                        tables.append(grid_stars_pointing[_guide_star_cat])
+                    # grid_stars_pointing = viz.query_region(pointing, radius_rad * u.rad, catalog=_guide_star_cat,
+                    #                                        cache=False)
+                    grid_stars_pointing = gaia.cone_search(pointing, radius_rad * u.rad).get_results()
+                    if (grid_stars_pointing is not None) and len(list(grid_stars_pointing.keys())) != 0:
+                        print('number of stars in this pointing:', len(grid_stars_pointing))
+                        tables.append(grid_stars_pointing)
                         # no stars found? proceed to next pointing
                 print('number of pointings with stars:', len(tables))
                 if len(tables) == 1:
                     grid_stars = tables[0]
                 elif len(tables) > 1:
                     grid_stars = table.vstack(tables)
-                    grid_stars = table.unique(grid_stars, keys='Source')
+                    grid_stars = table.unique(grid_stars, keys='source_id')
                     # print(grid_stars)
                 else:
                     # no stars? proceed to next obs. window
@@ -1211,7 +1210,7 @@ class Target(object):
             # print(grid_stars)
 
             # guide star magnitudes:
-            grid_star_mags = np.array(grid_stars['__Gmag_'])
+            grid_star_mags = np.array(grid_stars['phot_g_mean_mag'])
             # those that are bright enough for tip-tilt:
             mag_mask = grid_star_mags <= _m_lim_gs
 
@@ -1219,7 +1218,7 @@ class Target(object):
 
             for star in grid_stars[mag_mask]:
                 # grab a star by the coordinates :)
-                radec_star = np.array([star['RA_ICRS'], star['DE_ICRS']]) * np.pi / 180.0  # [rad]
+                radec_star = np.array([star['ra'], star['dec']]) * np.pi / 180.0  # [rad]
                 # print('radec_star', radec_star)
 
                 # astropy crd:
@@ -1230,7 +1229,7 @@ class Target(object):
 
                 # close enough?
                 if np.min(separations) < radius_rad:
-                    print('{:s}:'.format(self.object.name), star['Source'], 'is close enough!')
+                    print('{:s}:'.format(self.object.name), star['source_id'], 'is close enough!')
 
                     index_min, _, index_min_interpolated, distance_track = find_min(separations)
                     t_approach_star = t_start + t_step * index_min_interpolated
@@ -1258,7 +1257,7 @@ class Target(object):
 
                     # save:
                     # name [RA, Dec] min_distance_in_arcsec [window_start_time, window_stop_time], finding_chart_png
-                    self.guide_stars.append([star['Source'], [star['RA_ICRS'], star['DE_ICRS']], star['__Gmag_'],
+                    self.guide_stars.append([star['source_id'], [star['ra'], star['dec']], star['phot_g_mean_mag'],
                                              distance_track * 180.0 / np.pi * 3600, [t_start_star, t_stop_star],
                                              'not available'])
 
@@ -1369,9 +1368,11 @@ class Target(object):
 
                 # stars in the field (without mag cut-off):
                 star_sc = SkyCoord(ra=star_radec[0], dec=star_radec[1], unit=(u.deg, u.deg), frame='icrs')
-                fov_stars = viz.query_region(star_sc, width=window_size_star[0] * u.rad,
-                                             height=window_size_star[1] * u.rad,
-                                             catalog=_guide_star_cat, cache=False)
+                # fov_stars = viz.query_region(star_sc, width=window_size_star[0] * u.rad,
+                #                              height=window_size_star[1] * u.rad,
+                #                              catalog=_guide_star_cat, cache=False)
+                fov_stars = gaia.query_object(star_sc, width=window_size_star[0] * u.rad,
+                                              height=window_size_star[1] * u.rad)
 
                 # center plot on star:
                 print('plotting', self.object.name, star_name, star_obs_window[0], star_obs_window[1])
@@ -1381,7 +1382,7 @@ class Target(object):
                                 radec_start=radec_start_star, vmag_start=vmag_start_star,
                                 radec_stop=radec_stop_star, vmag_stop=vmag_stop_star,
                                 exposure=window_t_span_star,
-                                _model_psf=_model_psf, grid_stars=fov_stars[_guide_star_cat],
+                                _model_psf=_model_psf, grid_stars=fov_stars,
                                 _highlight_brighter_than_mag=_m_lim_gs,
                                 _display_plot=_display_plot, _save_plot=_save_plot,
                                 path=_path_nightly_date, name=plot_name)
@@ -1446,11 +1447,11 @@ class Target(object):
 
         ''' create a [fake] simulated image '''
         # apply linear transformation only:
-        pix_stars = np.array(w.wcs_world2pix(grid_stars['RA_ICRS'], grid_stars['DE_ICRS'], 0)).T
+        pix_stars = np.array(w.wcs_world2pix(grid_stars['ra'], grid_stars['dec'], 0)).T
         # apply linear + SIP:
         # pix_stars = np.array(w.all_world2pix(grid_stars['_RAJ2000'], grid_stars['_DEJ2000'], 0)).T
         # pix_stars = np.array(w.all_world2pix(grid_stars['RA_ICRS'], grid_stars['DE_ICRS'], 0)).T
-        mag_stars = np.array(grid_stars['__Gmag_'])
+        mag_stars = np.array(grid_stars['phot_g_mean_mag'])
         # print(pix_stars)
         # print(mag_stars)
 
@@ -1513,7 +1514,7 @@ class Target(object):
         # highlight stars bright enough to serve as tip-tilt guide stars:
         mask_bright = mag_stars <= _highlight_brighter_than_mag
         if np.max(mask_bright) == 1:
-            fig.show_markers(grid_stars[mask_bright]['RA_ICRS'], grid_stars[mask_bright]['DE_ICRS'],
+            fig.show_markers(grid_stars[mask_bright]['ra'], grid_stars[mask_bright]['dec'],
                              layer='marker_set_2', edgecolor=plt.cm.Oranges(0.9),
                              facecolor=plt.cm.Oranges(0.8), marker='+', s=50, alpha=0.9, linewidths=1)
 
@@ -1874,11 +1875,10 @@ class TargetList(object):
             for tn, target in enumerate(self.targets):
                 if target.is_observable:
                     status = self.targets[tn].set_guide_stars(_jpl_eph=self.inp['jpl_eph'],
-                                                              _guide_star_cat=_guide_star_cat,
                                                               _station=self.sta, _radius=_radius, _margin=_margin,
                                                               _m_lim_gs=_m_lim_gs, _cat_eop=self.inp['cat_eop'])
                     if status and _plot_field:
-                        self.targets[tn].plot_guide_stars(_jpl_eph=self.inp['jpl_eph'], _guide_star_cat=_guide_star_cat,
+                        self.targets[tn].plot_guide_stars(_jpl_eph=self.inp['jpl_eph'],
                                                           _station=self.sta, _margin=_margin,
                                                           _m_lim_gs=_m_lim_gs, _model_psf=model_psf,
                                                           _display_plot=_display_plot, _save_plot=_save_plot,
@@ -3586,7 +3586,7 @@ if __name__ == '__main__':
     date0 = datetime.datetime.utcnow()
     # date0 = datetime.datetime(2017, 6, 1)
 
-    for dd in range(0, 3):
+    for dd in range(0, 2):
         date = datetime.datetime(date0.year, date0.month, date0.day) + datetime.timedelta(days=dd)
         # date = datetime.datetime(2017, 1, 30)
         print('\nrunning computation for:', date)

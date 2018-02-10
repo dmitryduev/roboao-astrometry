@@ -1,0 +1,33 @@
+<Target>
+        <program_number>0</program_number>
+        <number>52</number>
+        <name>261648136368327424</name>
+        <visited_times_for_completion>1</visited_times_for_completion>
+        <visited_times>0</visited_times>
+        <done>0</done>
+        <cadence>0</cadence>
+        <comment>(3122)_Florence__16.486m@17.339arcsecMinDist</comment>
+        <time_critical_start>2018-02-10 05:30:16.703</time_critical_start>
+        <time_critical_stop>2018-02-10 05:44:54.384</time_critical_stop>
+        <Object>
+                <number>1</number>
+                <RA>05:15:52.107</RA>
+                <dec>50:13:26.724</dec>
+                <ra_rate>0</ra_rate>
+                <dec_rate>0</dec_rate>
+                <epoch>2000.0</epoch>
+                <magnitude>14.512</magnitude>
+                <solar_system>0</solar_system>
+                <done>0</done>
+                <Observation>
+                        <number>1</number>
+                        <exposure_time>180</exposure_time>
+                        <ao_flag>1</ao_flag>
+                        <filter_code>FILTER_LONGPASS_600</filter_code>
+                        <camera_mode>10</camera_mode>
+                        <repeat_times>1</repeat_times>
+                        <repeated>0</repeated>
+                        <done>0</done>
+                </Observation>
+        </Object>
+</Target>
