@@ -1047,7 +1047,7 @@ class Target(object):
         self.observability_windows = scans
 
     def set_guide_stars(self, _jpl_eph, _station=None,
-                        _radius=30.0, _margin=30.0, _m_lim_gs=16.0, _cat_eop=None):
+                        _radius=30.0, _margin=30.0, _m_lim_gs=16.0, eops=None):
         """ Get guide stars within radius arc seconds for each observability window.
 
         :param _jpl_eph:
@@ -1085,7 +1085,7 @@ class Target(object):
             # position of asteroid at arc start
             radec_start, _, vmag_start = self.object.raDecVmag(t_start.mjd, _jpl_eph, epoch='J2000',
                                                                station=_station, output_Vmag=True,
-                                                               _cat_eop=_cat_eop)
+                                                               eops=eops)
             radec_start = np.array(radec_start)
             radec_start_sc = SkyCoord(ra=radec_start[0], dec=radec_start[1], unit=(u.rad, u.rad), frame='icrs')
             rdecra_start = np.hstack([1.0, radec_start[::-1]])
@@ -1096,7 +1096,7 @@ class Target(object):
             # position of asteroid at arc end
             radec_stop, _, vmag_stop = self.object.raDecVmag(t_stop.mjd, _jpl_eph, epoch='J2000',
                                                              station=_station, output_Vmag=True,
-                                                             _cat_eop=_cat_eop)
+                                                             eops=eops)
             radec_stop = np.array(radec_stop)
             radec_stop_sc = SkyCoord(ra=radec_stop[0], dec=radec_stop[1], unit=(u.rad, u.rad), frame='icrs')
             rdecra_stop = np.hstack([1.0, radec_stop[::-1]])
@@ -1127,7 +1127,7 @@ class Target(object):
                 ti = t_start + t_step * ii
                 rd, rddot, _ = self.object.raDecVmag(ti.mjd, _jpl_eph, epoch='J2000',
                                                      station=_station, output_Vmag=False,
-                                                     _cat_eop=_cat_eop)
+                                                     eops=eops)
                 radecs.append(rd)
                 radec_dots.append(rddot)
             # print(radecs)
@@ -1145,7 +1145,7 @@ class Target(object):
             t_middle = t_start + t_step * (n_positions // 2)
             radec_middle, _, _ = self.object.raDecVmag(t_middle.mjd, _jpl_eph, epoch='J2000',
                                                        station=_station, output_Vmag=False,
-                                                       _cat_eop=_cat_eop)
+                                                       eops=eops)
             middle = SkyCoord(ra=radec_middle[0], dec=radec_middle[1], unit=(u.rad, u.rad), frame='icrs')
             # print('middle actual:', middle, radec_middle)
 
@@ -1171,7 +1171,7 @@ class Target(object):
 
                 grid_stars = gaia.cone_search(middle, np.max(window_size) * u.rad).get_results()
                 # print(list(grid_stars['phot_g_mean_mag']))
-                if (grid_stars is None) or (len(list(grid_stars.keys())) == 0):
+                if (grid_stars is None) or (len(list(grid_stars.keys())) == 0) or len(grid_stars) == 0:
                     # no stars found? proceed to next window
                     continue
             else:
@@ -1192,9 +1192,11 @@ class Target(object):
                     # grid_stars_pointing = viz.query_region(pointing, radius_rad * u.rad, catalog=_guide_star_cat,
                     #                                        cache=False)
                     grid_stars_pointing = gaia.cone_search(pointing, radius_rad * u.rad).get_results()
+                    # print(grid_stars_pointing)
                     if (grid_stars_pointing is not None) and len(list(grid_stars_pointing.keys())) != 0:
                         print('number of stars in this pointing:', len(grid_stars_pointing))
-                        tables.append(grid_stars_pointing)
+                        if len(grid_stars_pointing) > 0:
+                            tables.append(grid_stars_pointing)
                         # no stars found? proceed to next pointing
                 print('number of pointings with stars:', len(tables))
                 if len(tables) == 1:
@@ -1300,7 +1302,7 @@ class Target(object):
 
     def plot_guide_stars(self, _jpl_eph, _guide_star_cat=u'I/337/gaia', _station=None,
                          _margin=30.0, _m_lim_gs=16.0, _model_psf=None, _display_plot=False,
-                         _save_plot=False, _path_nightly_date='./', _cat_eop=None):
+                         _save_plot=False, _path_nightly_date='./', eops=None):
         """
             Plot fields with guide stars:
         :param _jpl_eph:
@@ -1327,14 +1329,14 @@ class Target(object):
                                                                              epoch='J2000',
                                                                              station=_station,
                                                                              output_Vmag=True,
-                                                                             _cat_eop=_cat_eop)
+                                                                             eops=eops)
                 radec_start_star = np.array(radec_start_star)
                 # end of the 'arc'
                 radec_stop_star, _, vmag_stop_star = self.object.raDecVmag(t_stop_star.mjd, _jpl_eph,
                                                                            epoch='J2000',
                                                                            station=_station,
                                                                            output_Vmag=True,
-                                                                           _cat_eop=_cat_eop)
+                                                                           eops=eops)
                 radec_stop_star = np.array(radec_stop_star)
 
                 # want to center on the track instead?
@@ -1875,15 +1877,15 @@ class TargetList(object):
             for tn, target in enumerate(self.targets):
                 if target.is_observable:
                     status = self.targets[tn].set_guide_stars(_jpl_eph=self.inp['jpl_eph'],
-                                                              _station=self.sta, _radius=_radius, _margin=_margin,
-                                                              _m_lim_gs=_m_lim_gs, _cat_eop=self.inp['cat_eop'])
+                                                              _station=deepcopy(self.sta), _radius=_radius, _margin=_margin,
+                                                              _m_lim_gs=_m_lim_gs, eops=self.eops)
                     if status and _plot_field:
                         self.targets[tn].plot_guide_stars(_jpl_eph=self.inp['jpl_eph'],
-                                                          _station=self.sta, _margin=_margin,
+                                                          _station=deepcopy(self.sta), _margin=_margin,
                                                           _m_lim_gs=_m_lim_gs, _model_psf=model_psf,
                                                           _display_plot=_display_plot, _save_plot=_save_plot,
                                                           _path_nightly_date=_path_nightly_date,
-                                                          _cat_eop=self.inp['cat_eop'])
+                                                          eops=self.eops)
 
     def make_nightly_json(self, _path_nightly_date='./'):
         """
@@ -2021,9 +2023,9 @@ class TargetListAsteroids(TargetList):
         asteroid = MinorBody(target['name'], a=a, e=e, i=i, w=w, Node=Node, M0=M0, GM=GSUN, t0=t0, H=H, G=G)
 
         # jpl_eph - path to eph used by pypride
-        radec, radec_dot, Vmag = asteroid.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
+        radec, radec_dot, Vmag = asteroid.raDecVmag(_mjd, self.inp['jpl_eph'], station=deepcopy(self.sta),
                                                     epoch=epoch, output_Vmag=output_Vmag,
-                                                    _cat_eop=self.inp['cat_eop'])
+                                                    eops=self.eops)
 
         return radec, radec_dot, Vmag
 
@@ -2145,8 +2147,8 @@ class TargetListComets(TargetList):
         comet = MinorBody(target['name'], q=q, e=e, i=i, w=w, Node=Node, tau=tau, GM=GSUN, t0=t0, H=H, G=G)
 
         # jpl_eph - path to eph used by pypride
-        radec, radec_dot, Vmag = comet.raDecVmag(_mjd, self.inp['jpl_eph'], station=self.sta,
-                                                 epoch=epoch, output_Vmag=output_Vmag, _cat_eop=self.inp['cat_eop'])
+        radec, radec_dot, Vmag = comet.raDecVmag(_mjd, self.inp['jpl_eph'], station=deepcopy(self.sta),
+                                                 epoch=epoch, output_Vmag=output_Vmag, eops=self.eops)
 
         # FIXME: debugging output
         # print(target['name'], [Angle(radec[0], unit=u.rad).hms, Angle(radec[1], unit=u.rad).dms],
@@ -2187,6 +2189,7 @@ class MinorBodyDatabase(object):
                     response = urllib2.urlopen(self.database_url)
                     with open(self.f_database, 'w') as f:
                         f.write(response.read())
+                    print('Done.')
                 except Exception as err:
                     print(str(err))
                     traceback.print_exc()
@@ -2865,8 +2868,8 @@ class MinorBody(object):
         return state
 
     @staticmethod
-    @memoize
-    def PNmatrix(t, lon_gcen, u, v, _cat_eop):
+    # @memoize
+    def PNmatrix(t, lon_gcen, u, v, eops):
         """
             Compute (geocentric) IAU2000 precession/nutation matrix for epoch
             t -- astropy.time.Time object
@@ -2883,7 +2886,8 @@ class MinorBody(object):
         TAI, TT = taitime(mjd, UTC)
 
         ''' load cats '''
-        eops = load_eops(_cat_eop, tstamp)
+        # don't load it every freakin time
+        # eops = load_eops(_cat_eop, tstamp)
 
         ''' interpolate eops to tstamp '''
         UT1, eop_int = eop_iers(mjd, UTC, eops)
@@ -2898,7 +2902,7 @@ class MinorBody(object):
         return r2000
 
     # for some reason, jit-compilation of this one slows down the execution significantly!
-    def raDecVmag(self, mjd, jpl_eph, epoch='J2000', station=None, output_Vmag=False, _cat_eop=None):
+    def raDecVmag(self, mjd, jpl_eph, epoch='J2000', station=None, output_Vmag=False, eops=None):
         """ Calculate ra/dec's from equatorial state
             Then compute asteroid's expected visual magnitude
 
@@ -2926,8 +2930,9 @@ class MinorBody(object):
         # print(state)
 
         # station GCRS position/velocity:
-        if (station is not None) and (station.r_GCRS is None):
-            r2000 = self.PNmatrix(Time(mjd, format='mjd'), station.lon_gcen, station.u, station.v, _cat_eop)
+        # if (station is not None) and (station.r_GCRS is None):
+        if station is not None:
+            r2000 = self.PNmatrix(Time(mjd, format='mjd'), station.lon_gcen, station.u, station.v, eops)
             station.GTRS_to_GCRS(r2000)
 
         # quick and dirty LT computation (but accurate enough for pointing, I hope)
