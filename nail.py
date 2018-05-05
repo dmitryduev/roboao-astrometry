@@ -228,10 +228,16 @@ if __name__ == '__main__':
     ra_t, dec_t = nail_wcs(mapping, args.x, args.y, args.ra, args.dec, drizzled=args.drizzled)
     ra_t, dec_t = ra_t[0], dec_t[0]
 
-    print(ra_t, dec_t)
+    print(args.ra, args.dec)
+
+    # print(ra_t, dec_t)
 
     ''' Now, any (x, y) pair can be converted to (RA, Dec). For exmaple, '''
-    ra_i, dec_i = xy2radec(ra_t, dec_t, mapping, 926.5996, 919.5908, xy_center=(512, 512), drizzled=False)
-    ra_i, dec_i = xy2radec(ra_t, dec_t, mapping, -391.9349, 374.8141, xy_center=(0, 0), drizzled=False)
-
+    ra_i, dec_i = xy2radec(ra_t, dec_t, mapping, 1115.23, 1055.18, xy_center=(0, 0), drizzled=args.drizzled)
     print(ra_i, dec_i)
+    # ra_i, dec_i = xy2radec(ra_t, dec_t, mapping, 1115.23, 1055.18, xy_center=(512, 512), drizzled=args.drizzled)
+    # print(ra_i, dec_i)
+    # ra_i, dec_i = xy2radec(ra_t, dec_t, mapping, 1115.23, 1055.18, xy_center=(1024, 1024), drizzled=args.drizzled)
+    # ra_i, dec_i = xy2radec(ra_t, dec_t, mapping, -391.9349, 374.8141, xy_center=(0, 0), drizzled=False)
+    # print(ra_i, dec_i)
+

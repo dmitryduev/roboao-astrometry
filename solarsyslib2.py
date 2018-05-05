@@ -45,6 +45,8 @@ import multiprocessing
 import gc
 # from distributed import Client, LocalCluster
 
+from penquins import Kowalski
+
 import warnings
 
 import matplotlib
@@ -73,6 +75,9 @@ with suspend_cache(Gaia):
     gaia = Gaia
     # gaia.ROW_LIMIT = -1
     # gaia.TIMEOUT = 30
+
+# init kowalski:
+kowalski = Kowalski(username='duev', password='rtygbopi][')
 
 
 def is_planet_or_moon(name):
@@ -1169,11 +1174,28 @@ class Target(object):
                 #                               catalog=_guide_star_cat)
                 # print(middle)
 
-                grid_stars = gaia.cone_search(middle, np.max(window_size) * u.rad).get_results()
-                # print(list(grid_stars['phot_g_mean_mag']))
-                if (grid_stars is None) or (len(list(grid_stars.keys())) == 0) or len(grid_stars) == 0:
-                    # no stars found? proceed to next window
-                    continue
+                if True:
+                    grid_stars = gaia.cone_search(middle, np.max(window_size) * u.rad).get_results()
+                    # print(list(grid_stars['phot_g_mean_mag']))
+                    if (grid_stars is None) or (len(list(grid_stars.keys())) == 0) or len(grid_stars) == 0:
+                        # no stars found? proceed to next window
+                        continue
+                if False:
+                    q = {"query_type": "cone_search",
+                         "object_coordinates": {"radec": "[({:f}, {:f})]".format(middle.ra.deg, middle.dec.deg),
+                                                "cone_search_radius": "{:f}".format(np.max(window_size)),
+                                                "cone_search_unit": "rad"},
+                         "catalogs": {"Gaia_DR1": {"filter": {},
+                                                   "projection": {"source_id": 1,
+                                                                  "ra": 1,
+                                                                  "dec": 1,
+                                                                  "phot_g_mean_mag": 1
+                                                                  }
+                                                   }
+                                      }
+                         }
+                    grid_stars = kowalski.query_sync(query=q)
+                    print(grid_stars)
             else:
                 # for large fields, 'split' the trajectory and search in a smaller field around each 'pointing'
                 # along the trajectory.
@@ -1188,16 +1210,36 @@ class Target(object):
 
                 for pi, pointing in enumerate(pointings[:max_pointings]):
                     print('querying pointing #{:d}'.format(pi + 1))
-                    # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
-                    # grid_stars_pointing = viz.query_region(pointing, radius_rad * u.rad, catalog=_guide_star_cat,
-                    #                                        cache=False)
-                    grid_stars_pointing = gaia.cone_search(pointing, radius_rad * u.rad).get_results()
-                    # print(grid_stars_pointing)
-                    if (grid_stars_pointing is not None) and len(list(grid_stars_pointing.keys())) != 0:
-                        print('number of stars in this pointing:', len(grid_stars_pointing))
-                        if len(grid_stars_pointing) > 0:
-                            tables.append(grid_stars_pointing)
-                        # no stars found? proceed to next pointing
+
+                    if True:
+                        # viz.column_filters = {'<Gmag>': '<{:.1f}'.format(_m_lim_gs)}
+                        # grid_stars_pointing = viz.query_region(pointing, radius_rad * u.rad, catalog=_guide_star_cat,
+                        #                                        cache=False)
+                        grid_stars_pointing = gaia.cone_search(pointing, radius_rad * u.rad).get_results()
+                        # print(grid_stars_pointing)
+                        if (grid_stars_pointing is not None) and len(list(grid_stars_pointing.keys())) != 0:
+                            print('number of stars in this pointing:', len(grid_stars_pointing))
+                            if len(grid_stars_pointing) > 0:
+                                tables.append(grid_stars_pointing)
+                            # no stars found? proceed to next pointing
+
+                    if False:
+                        q = {"query_type": "cone_search",
+                             "object_coordinates": {"radec": "[({:f}, {:f})]".format(pointing.ra.deg, pointing.dec.deg),
+                                                    "cone_search_radius": "{:f}".format(radius_rad),
+                                                    "cone_search_unit": "rad"},
+                             "catalogs": {"Gaia_DR1": {"filter": {},
+                                                       "projection": {"source_id": 1,
+                                                                      "ra": 1,
+                                                                      "dec": 1,
+                                                                      "phot_g_mean_mag": 1
+                                                                      }
+                                                       }
+                                          }
+                             }
+                        grid_stars = kowalski.query_sync(query=q)
+                        print(grid_stars)
+
                 print('number of pointings with stars:', len(tables))
                 if len(tables) == 1:
                     grid_stars = tables[0]
