@@ -77,7 +77,7 @@ with suspend_cache(Gaia):
     # gaia.TIMEOUT = 30
 
 # init kowalski:
-kowalski = Kowalski(username='duev', password='rtygbopi][')
+kowalski = Kowalski(username='duev', password='PWD')
 
 
 def is_planet_or_moon(name):
