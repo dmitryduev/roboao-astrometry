@@ -56,6 +56,8 @@ def map_xy_all_sky(p, xy_linspace, drizzled=False):
 
     M = np.matrix([[M_11, M_12], [M_21, M_22]])
     if drizzled:
+        x_tan *= 2.0
+        y_tan *= 2.0
         M /= 2.0
         a_02 /= 2
         a_11 /= 2

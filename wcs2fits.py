@@ -85,7 +85,11 @@ if __name__ == '__main__':
     w.wcs.equinox = 2000.0
     # position of the tangential point on the detector [pix]
     # w.wcs.crpix = np.array([w.naxis1 // 2, w.naxis2 // 2])
-    w.wcs.crpix = np.array([x_tan, y_tan])
+    if args.drizzled:
+        w.wcs.crpix = np.array([x_tan * 2.0, y_tan * 2.0])
+    else:
+        w.wcs.crpix = np.array([x_tan, y_tan])
+
     # sky coordinates of the tangential point; this is not known a priori. could set to TELRA/TELDEC?
     if ('TELRA' in header) and ('TELDEC' in header):
         w.wcs.crval = [header['TELRA'][0], header['TELDEC'][0]]
